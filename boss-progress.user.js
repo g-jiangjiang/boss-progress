@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.4.8
+// @version      0.4.11
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -31,6 +31,8 @@
         muteObserver: false,
         lastScanAt: 0,
         searchQuery: '',
+        statusFilter: 'all',
+        accountFilter: 'all',
         enableNetwork: false,
         tabStatusMap: {}
     };
@@ -666,6 +668,15 @@
         return label ? `${status} ${label}` : status;
     }
 
+    function getStatusClass(statusText) {
+        const text = statusText || '';
+        if (/面试/.test(text)) return 'bp-status-interviewed';
+        if (/投递|申请|投/.test(text)) return 'bp-status-delivered';
+        if (/沟通/.test(text)) return 'bp-status-communicated';
+        if (/收藏|感兴趣/.test(text)) return 'bp-status-favorite';
+        return 'bp-status-unknown';
+    }
+
     function shouldShowChatStatus(record) {
         if (!record) return false;
         const flags = record.flags || {};
@@ -859,6 +870,22 @@
           <div class="bp-tab-hint"></div>
         </div>
         <input class="bp-search" placeholder="搜索 公司 / 岗位 / 状态" />
+        <div class="bp-filter">
+          <label>状态筛选</label>
+          <select class="bp-status-filter">
+            <option value="all">全部</option>
+            <option value="已沟通">已沟通</option>
+            <option value="已投递">已投递</option>
+            <option value="已面试">已面试</option>
+            <option value="已收藏">已收藏</option>
+          </select>
+        </div>
+        <div class="bp-filter">
+          <label>账号筛选</label>
+          <select class="bp-account-filter">
+            <option value="all">全部</option>
+          </select>
+        </div>
         <div class="bp-stats"></div>
         <div class="bp-list"></div>
       </div>
@@ -887,6 +914,9 @@
       #${PANEL_ID} button { border: 1px solid #cbd5f5; background: #f8fafc; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
       #${PANEL_ID} button:hover { background: #eef2ff; }
       #${PANEL_ID} .bp-search { width: 100%; padding: 6px; border: 1px solid #cbd5f5; border-radius: 4px; margin-bottom: 8px; }
+      #${PANEL_ID} .bp-filter { display: flex; align-items: center; gap: 6px; margin: 0 0 8px 0; color: #64748b; }
+      #${PANEL_ID} .bp-filter label { white-space: nowrap; }
+      #${PANEL_ID} .bp-status-filter { flex: 1; padding: 4px 6px; border: 1px solid #cbd5f5; border-radius: 4px; background: #fff; }
       #${PANEL_ID} .bp-stats { margin-bottom: 8px; color: #475569; }
       #${PANEL_ID} .bp-list { max-height: 45vh; overflow: auto; border-top: 1px dashed #e2e8f0; padding-top: 8px; }
       #${PANEL_ID} .bp-item { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }
@@ -894,15 +924,29 @@
       #${PANEL_ID} .bp-item-title { font-weight: 600; }
       #${PANEL_ID} .bp-item-sub { color: #64748b; }
       #${PANEL_ID}.collapsed .bp-body { display: none; }
-      .${BADGE_CLASS} { position: absolute; top: 8px; right: 8px; background: #ffedd5; color: #9a3412; padding: 2px 6px; font-size: 12px; border-radius: 10px; z-index: 20; max-width: 140px; }
-      .${BADGE_CLASS} .bp-badge-line { display: block; white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-      .${BADGE_CLASS} .bp-badge-sub { display: block; white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: #92400e; }
+      .${BADGE_CLASS} { position: absolute; top: 8px; right: 8px; background: transparent; padding: 0; font-size: 12px; border-radius: 10px; z-index: 20; max-width: 160px; display: flex; flex-direction: column; align-items: flex-end; }
+      .${BADGE_CLASS} .bp-badge-line { display: inline-block; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; padding: 2px 6px; border-radius: 10px; line-height: 1.2; background: #f1f5f9; color: #334155; }
+      .${BADGE_CLASS} .bp-badge-sub { display: inline-block; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 2px 6px; border-radius: 10px; line-height: 1.2; background: #f8fafc; color: #64748b; }
       .${BADGE_CLASS} .bp-badge-gap { height: 2px; }
+      .bp-status-communicated { background: #e0f2fe; color: #0369a1; }
+      .bp-status-delivered { background: #ffedd5; color: #9a3412; }
+      .bp-status-interviewed { background: #dcfce7; color: #166534; }
+      .bp-status-favorite { background: #f3e8ff; color: #6b21a8; }
+      .bp-status-unknown { background: #f1f5f9; color: #334155; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-communicated { background: #e0f2fe !important; color: #0369a1 !important; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-delivered { background: #ffedd5 !important; color: #9a3412 !important; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-interviewed { background: #dcfce7 !important; color: #166534 !important; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-favorite { background: #f3e8ff !important; color: #6b21a8 !important; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-unknown { background: #f1f5f9 !important; color: #334155 !important; }
       .boss-progress-has-badge::before,
       .boss-progress-has-badge::after,
       .boss-progress-has-badge .${BADGE_CLASS}::before,
       .boss-progress-has-badge .${BADGE_CLASS}::after { content: none !important; }
       .${DETAIL_BADGE_CLASS} { display: inline-block; margin-left: 8px; background: #dbeafe; color: #1d4ed8; padding: 2px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+      .${DETAIL_BADGE_CLASS}.bp-status-communicated { background: #e0f2fe; color: #0369a1; }
+      .${DETAIL_BADGE_CLASS}.bp-status-delivered { background: #ffedd5; color: #9a3412; }
+      .${DETAIL_BADGE_CLASS}.bp-status-interviewed { background: #dcfce7; color: #166534; }
+      .${DETAIL_BADGE_CLASS}.bp-status-favorite { background: #f3e8ff; color: #6b21a8; }
     `;
         document.head.appendChild(style);
         document.body.appendChild(panel);
@@ -963,6 +1007,14 @@
             state.searchQuery = event.target.value.trim().toLowerCase();
             renderPanel();
         });
+        panel.querySelector('.bp-status-filter').addEventListener('change', (event) => {
+            state.statusFilter = event.target.value || 'all';
+            renderPanel();
+        });
+        panel.querySelector('.bp-account-filter').addEventListener('change', (event) => {
+            state.accountFilter = event.target.value || 'all';
+            renderPanel();
+        });
         panel.querySelector('.bp-file').addEventListener('change', (event) => {
             const file = event.target.files[0];
             if (file) {
@@ -1000,9 +1052,15 @@
         }
 
         const records = await listRecordsByAccount(state.accountKey);
-        const filtered = state.searchQuery
+        let filtered = state.searchQuery
             ? records.filter((record) => (record.searchText || '').toLowerCase().includes(state.searchQuery))
             : records;
+        if (state.statusFilter && state.statusFilter !== 'all') {
+            filtered = filtered.filter((record) => record.statusText === state.statusFilter);
+        }
+        if (state.accountFilter && state.accountFilter !== 'all') {
+            filtered = filtered.filter((record) => formatAccountLabel(record) === state.accountFilter);
+        }
 
         const total = records.length;
         const communicated = records.filter((r) => r.statusText === '已沟通').length;
@@ -1011,6 +1069,27 @@
 
         const stats = panel.querySelector('.bp-stats');
         stats.textContent = `总计 ${total} · 已沟通 ${communicated} · 已投递 ${delivered} · 已面试 ${interviewed}`;
+        const statusSelect = panel.querySelector('.bp-status-filter');
+        if (statusSelect && statusSelect.value !== state.statusFilter) {
+            statusSelect.value = state.statusFilter || 'all';
+        }
+        const accountSelect = panel.querySelector('.bp-account-filter');
+        if (accountSelect) {
+            const labels = Array.from(new Set(records.map((record) => formatAccountLabel(record)).filter(Boolean)));
+            labels.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+            const options = ['all', ...labels];
+            if (state.accountFilter !== 'all' && !labels.includes(state.accountFilter)) {
+                state.accountFilter = 'all';
+            }
+            accountSelect.innerHTML = '';
+            options.forEach((value) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value === 'all' ? '全部' : value;
+                accountSelect.appendChild(option);
+            });
+            accountSelect.value = state.accountFilter || 'all';
+        }
 
         const list = panel.querySelector('.bp-list');
         list.innerHTML = '';
@@ -1694,12 +1773,13 @@
             matchedItems.forEach((item) => {
                 const status = formatStatusWithScope(item.record, item.companyOnly);
                 if (!status) return;
+                const statusClass = getStatusClass(status);
                 const accountLabel = formatAccountLabel(item.record);
                 const jobInfo = item.companyOnly
                     ? formatCompanyJobList(getCompanyJobs(companyJobs, companyKey, item.record.accountKey), 3)
                     : { inline: '', full: '' };
                 const textBase = formatStatusAccount(status, accountLabel);
-                const lines = [{ text: textBase, className: 'bp-badge-line' }];
+                const lines = [{ text: textBase, className: `bp-badge-line ${statusClass}` }];
                 if (item.companyOnly && jobInfo.inline) {
                     const compact = renderCompanyJobsInline(getCompanyJobs(companyJobs, companyKey, item.record.accountKey), 1);
                     lines.push({ text: `曾投：${compact || jobInfo.inline}`, className: 'bp-badge-sub' });
@@ -1757,9 +1837,10 @@
             matchedItems.forEach((item) => {
                 const status = formatStatusWithScope(item.record, true);
                 if (!status) return;
+                const statusClass = getStatusClass(status);
                 const accountLabel = formatAccountLabel(item.record);
                 const textBase = formatStatusAccount(status, accountLabel);
-                const lines = [{ text: textBase, className: 'bp-badge-line' }];
+                const lines = [{ text: textBase, className: `bp-badge-line ${statusClass}` }];
                 blocks.push({ lines });
                 const title = formatBadgeTitle(item.record, true, '');
                 if (title) titleLines.push(title);
@@ -1815,6 +1896,7 @@
                 if (!best || !best.statusText) continue;
                 const status = formatStatusWithScope(best, companyOnly);
                 if (!status) continue;
+                const statusClass = getStatusClass(status);
                 ensurePositioned(card);
                 let badge = card.querySelector(`.${BADGE_CLASS}`);
                 if (!badge) {
@@ -1824,7 +1906,7 @@
                 }
                 const accountLabel = formatAccountLabel(best);
                 const badgeText = formatStatusAccount(status, accountLabel);
-                const blocks = [{ lines: [{ text: badgeText, className: 'bp-badge-line' }] }];
+                const blocks = [{ lines: [{ text: badgeText, className: `bp-badge-line ${statusClass}` }] }];
                 if (companyOnly && best.jobName) {
                     blocks[0].lines.push({ text: `曾投：${best.jobName}`, className: 'bp-badge-sub' });
                 }
@@ -1860,6 +1942,8 @@
                                 badge.className = DETAIL_BADGE_CLASS;
                                 target.appendChild(badge);
                             }
+                            const statusClass = getStatusClass(status);
+                            badge.className = `${DETAIL_BADGE_CLASS} ${statusClass}`.trim();
                             const accountLabel = formatAccountLabel(best);
                             const badgeText = formatStatusAccount(status, accountLabel);
                             badge.textContent = badgeText;
