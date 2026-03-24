@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.4.12
+// @version      0.4.13
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -514,6 +514,13 @@
         return fallback || '';
     }
 
+    async function deleteRecordById(id) {
+        if (!id) return;
+        await withStore(STORE_RECORDS, 'readwrite', (store) => {
+            store.delete(id);
+        });
+    }
+
     function buildRecordId(accountKey, scope, companyId, jobId) {
         return [accountKey, scope || 'company', companyId || 'unknown', jobId || 'none'].join('|');
     }
@@ -969,10 +976,13 @@
       #${PANEL_ID} .bp-status-filter { flex: 1; padding: 4px 6px; border: 1px solid #cbd5f5; border-radius: 4px; background: #fff; }
       #${PANEL_ID} .bp-stats { margin-bottom: 8px; color: #475569; }
       #${PANEL_ID} .bp-list { max-height: 45vh; overflow: auto; border-top: 1px dashed #e2e8f0; padding-top: 8px; }
-      #${PANEL_ID} .bp-item { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }
+      #${PANEL_ID} .bp-item { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; display: flex; gap: 8px; align-items: flex-start; }
       #${PANEL_ID} .bp-item:last-child { border-bottom: none; }
+      #${PANEL_ID} .bp-item-main { flex: 1; min-width: 0; }
       #${PANEL_ID} .bp-item-title { font-weight: 600; }
       #${PANEL_ID} .bp-item-sub { color: #64748b; }
+      #${PANEL_ID} .bp-item-delete { border: 1px solid #fecaca; background: #fff1f2; color: #b91c1c; padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+      #${PANEL_ID} .bp-item-delete:hover { background: #ffe4e6; }
       #${PANEL_ID}.collapsed .bp-body { display: none; }
       .${BADGE_CLASS} { position: absolute; top: 8px; right: 8px; background: transparent; padding: 0; font-size: 12px; border-radius: 10px; z-index: 20; max-width: 160px; display: flex; flex-direction: column; align-items: flex-end; }
       .${BADGE_CLASS} .bp-badge-line { display: inline-block; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; padding: 2px 6px; border-radius: 10px; line-height: 1.2; background: #f1f5f9; color: #334155; }
@@ -1155,6 +1165,8 @@
         for (const record of visible) {
             const item = document.createElement('div');
             item.className = 'bp-item';
+            const main = document.createElement('div');
+            main.className = 'bp-item-main';
             const title = document.createElement('div');
             title.className = 'bp-item-title';
             title.textContent = `${record.companyName || '未知公司'}${record.jobName ? ' · ' + record.jobName : ''}`;
@@ -1165,8 +1177,19 @@
             const hrLabel = record.hrInfo ? ` · HR:${record.hrInfo}` : '';
             const interviewLabel = record.interviewTime ? ` · 面试:${record.interviewTime}` : '';
             sub.textContent = `${accountInfo}${record.statusText || '无状态'} · ${record.scope === 'job' ? '岗位记录' : '公司记录'}${hrLabel}${interviewLabel}`;
-            item.appendChild(title);
-            item.appendChild(sub);
+            main.appendChild(title);
+            main.appendChild(sub);
+            item.appendChild(main);
+            const delBtn = document.createElement('button');
+            delBtn.className = 'bp-item-delete';
+            delBtn.textContent = '删除';
+            delBtn.addEventListener('click', async () => {
+                const ok = confirm('确认删除这条记录？');
+                if (!ok) return;
+                await deleteRecordById(record.id);
+                scheduleRefresh();
+            });
+            item.appendChild(delBtn);
             list.appendChild(item);
         }
     }
