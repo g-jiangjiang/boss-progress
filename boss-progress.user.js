@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.4.11
+// @version      0.4.12
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -271,12 +271,62 @@
         return pickDataAttribute(el, attrs);
     }
 
+    function looksLikeJobTitle(text) {
+        if (!text) return false;
+        return /工程师|开发|产品|运营|设计|测试|算法|前端|后端|全栈|Java|Python|PHP|Go|C\+\+|架构|客户端|安卓|Android|iOS|运维|安全|销售|客服|实习|分析师|经理|主管|专员|顾问/.test(text);
+    }
+
+    function shouldCleanCompanyName(text) {
+        if (!text) return false;
+        if (looksLikeJobTitle(text)) return true;
+        if (/\d+\s*[-~]\s*\d+\s*[kK万千]/.test(text)) return true;
+        if (/\[[^\]]+]/.test(text) || /（[^）]+）/.test(text) || /\([^)]*\)/.test(text)) return true;
+        return false;
+    }
+
+    function cleanCompanyNameFromMix(text, jobName) {
+        let cleaned = normalizeText(text);
+        if (!cleaned) return '';
+        const job = normalizeText(jobName || '');
+        if (job) {
+            cleaned = cleaned.replace(job, '');
+            cleaned = cleaned.replace(job.replace(/\s+/g, ''), '');
+        }
+        cleaned = cleaned.replace(/\d+\s*[-~]\s*\d+\s*[kK万千][^\\s]*/g, '');
+        cleaned = cleaned.replace(/\[[^\]]+]/g, '');
+        cleaned = cleaned.replace(/（[^）]+）/g, '');
+        cleaned = cleaned.replace(/\([^)]*\)/g, '');
+        cleaned = cleaned.replace(/[|]/g, ' ');
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+        return cleaned;
+    }
+
+    function normalizeCompanyCandidate(text, jobName) {
+        let cleaned = normalizeText(text);
+        if (!cleaned) return '';
+        if (shouldCleanCompanyName(cleaned)) {
+            const next = cleanCompanyNameFromMix(cleaned, jobName);
+            if (next) cleaned = next;
+        }
+        return cleaned;
+    }
+
+    function pickCompanyCandidate(text, jobName) {
+        const cleaned = normalizeCompanyCandidate(text, jobName);
+        return isLikelyCompanyName(cleaned) ? cleaned : '';
+    }
+
     function isLikelyCompanyName(text) {
         if (!text) return false;
         if (/^(HR|人事|招聘|猎头)/i.test(text)) return false;
-        if (/HR|人事|招聘/.test(text)) return false;
+        if (/HR|人事|招聘|猎头/.test(text)) return false;
         if (/先生|女士|HRBP/.test(text)) return false;
+        if (/沟通|投递|面试|薪资|待遇/.test(text)) return false;
         if (/^\d/.test(text)) return false;
+        if (looksLikeJobTitle(text)) return false;
+        if (/\d+\s*[-~]\s*\d+\s*[kK万千]/.test(text)) return false;
+        if (/\[[^\]]+]/.test(text) || /（[^）]+）/.test(text) || /\([^)]*\)/.test(text)) return false;
+        if (text.length > 40) return false;
         return true;
     }
 
@@ -1201,35 +1251,40 @@
         }
         if (!isLikelyJobName(jobName)) jobName = '';
 
-        let companyName = pickText(card, ['.company-name', '.company-info .name', '.company-title', '.job-card-company', '.company-info a', '.company-name a', '.company', '.company-info', '.job-company', '.job-primary .company-name', '.job-primary .company-info', '.company-text']);
-        if (!isLikelyCompanyName(companyName)) {
+        let companyName = pickCompanyCandidate(pickText(card, ['.company-name', '.company-info .name', '.company-title', '.job-card-company', '.company-info a', '.company-name a', '.company', '.company-info', '.job-company', '.job-primary .company-name', '.job-primary .company-info', '.company-text']), jobName);
+        if (!companyName) {
             const fallback = pickText(card, ['.company-info', '.company', '.job-company', '.job-card-company']);
-            if (isLikelyCompanyName(fallback)) companyName = fallback;
+            companyName = pickCompanyCandidate(fallback, jobName);
         }
-        if (!isLikelyCompanyName(companyName) && companyLink) {
+        if (!companyName && companyLink) {
             const linkText = normalizeText(companyLink.textContent || '');
-            if (isLikelyCompanyName(linkText)) companyName = linkText;
+            companyName = pickCompanyCandidate(linkText, jobName);
         }
-        if (!isLikelyCompanyName(companyName)) {
+        if (!companyName) {
             const logo = card.querySelector('img[alt]');
             const logoAlt = logo ? normalizeText(logo.getAttribute('alt') || '') : '';
-            if (isLikelyCompanyName(logoAlt)) companyName = logoAlt;
+            companyName = pickCompanyCandidate(logoAlt, jobName);
         }
-        if (!isLikelyCompanyName(companyName)) {
+        if (!companyName) {
             const candidates = card.querySelectorAll('[class*="company"], [class*="brand"]');
             for (const el of candidates) {
                 const text = normalizeText(el.textContent || '');
-                if (isLikelyCompanyName(text)) {
-                    companyName = text;
+                const candidate = pickCompanyCandidate(text, jobName);
+                if (candidate) {
+                    companyName = candidate;
                     break;
                 }
             }
         }
-        if (!isLikelyCompanyName(companyName)) {
+        if (!companyName) {
             const blockCompany = pickCompanyFromTextBlock(card.textContent || '');
-            if (isLikelyCompanyName(blockCompany)) companyName = blockCompany;
+            companyName = pickCompanyCandidate(blockCompany, jobName);
         }
-        if (!isLikelyCompanyName(companyName)) companyName = '';
+        if (!companyName) {
+            const mixed = cleanCompanyNameFromMix(card.textContent || '', jobName);
+            companyName = pickCompanyCandidate(mixed, jobName);
+        }
+        if (!companyName) companyName = '';
         return { jobName, companyName };
     }
 
@@ -1290,27 +1345,32 @@
         }
         if (!isLikelyJobName(jobName)) jobName = '';
 
-        let companyName = pickText(card, ['.company-name', '.company-info .name', '.company-title', '.job-card-company', '.company-info a', '.company-name a', '.company', '.company-info', '.job-company']);
-        if (!isLikelyCompanyName(companyName)) {
+        let companyName = pickCompanyCandidate(pickText(card, ['.company-name', '.company-info .name', '.company-title', '.job-card-company', '.company-info a', '.company-name a', '.company', '.company-info', '.job-company']), jobName);
+        if (!companyName) {
             const fallback = pickText(card, ['.company-info', '.company', '.job-company', '.job-card-company']);
-            if (isLikelyCompanyName(fallback)) companyName = fallback;
+            companyName = pickCompanyCandidate(fallback, jobName);
         }
-        if (!isLikelyCompanyName(companyName)) {
+        if (!companyName) {
             const logo = card.querySelector('img[alt]');
             const logoAlt = logo ? normalizeText(logo.getAttribute('alt') || '') : '';
-            if (isLikelyCompanyName(logoAlt)) companyName = logoAlt;
+            companyName = pickCompanyCandidate(logoAlt, jobName);
         }
-        if (!isLikelyCompanyName(companyName)) {
+        if (!companyName) {
             const candidates = card.querySelectorAll('[class*="company"], [class*="brand"]');
             for (const el of candidates) {
                 const text = normalizeText(el.textContent || '');
-                if (isLikelyCompanyName(text)) {
-                    companyName = text;
+                const candidate = pickCompanyCandidate(text, jobName);
+                if (candidate) {
+                    companyName = candidate;
                     break;
                 }
             }
         }
-        if (!isLikelyCompanyName(companyName)) companyName = '';
+        if (!companyName) {
+            const mixed = cleanCompanyNameFromMix(card.textContent || '', jobName);
+            companyName = pickCompanyCandidate(mixed, jobName);
+        }
+        if (!companyName) companyName = '';
 
         const hrInfo = extractHrFromNode(card);
         const interviewTime = extractInterviewTimeFromNode(card);
