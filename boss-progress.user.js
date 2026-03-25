@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.4.13
+// @version      0.4.17
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -751,17 +751,27 @@
         return { inline: full, full };
     }
 
+    function formatJobListForTitle(text) {
+        if (!text) return '';
+        return normalizeText(text).replace(/、/g, '\n');
+    }
+
     function formatBadgeTitle(record, companyOnly, jobListText) {
         if (!record) return '';
-        const parts = [];
+        const lines = [];
+        const firstLineParts = [];
         const account = formatAccountLabel(record);
         const status = formatStatusWithScope(record, companyOnly);
-        if (account) parts.push(`账号:${account}`);
-        if (status) parts.push(`状态:${status}`);
-        if (record.companyName) parts.push(`公司:${record.companyName}`);
-        if (record.jobName) parts.push(`岗位:${record.jobName}`);
-        if (companyOnly && jobListText) parts.push(`曾投岗位:${jobListText}`);
-        return parts.join(' | ');
+        if (account) firstLineParts.push(`账号:${account}`);
+        if (status) firstLineParts.push(`状态:${status}`);
+        if (record.companyName) firstLineParts.push(`公司:${record.companyName}`);
+        if (firstLineParts.length) lines.push(firstLineParts.join(' | '));
+        if (record.jobName) lines.push(`岗位:${record.jobName}`);
+        if (companyOnly && jobListText) {
+            const formatted = formatJobListForTitle(jobListText);
+            lines.push(`曾投岗位:\n${formatted}`);
+        }
+        return lines.join('\n');
     }
 
     function hasAnyFlag(flags) {
@@ -1924,8 +1934,13 @@
                 const accountLabel = formatAccountLabel(item.record);
                 const textBase = formatStatusAccount(status, accountLabel);
                 const lines = [{ text: textBase, className: `bp-badge-line ${statusClass}` }];
+                const jobList = getCompanyJobs(companyJobs, companyKey, item.record.accountKey);
+                const jobInfo = formatCompanyJobList(jobList, 2);
+                if (jobList.length > 1 && jobInfo.inline) {
+                    lines.push({ text: `曾投：${jobInfo.inline}`, className: 'bp-badge-sub' });
+                }
                 blocks.push({ lines });
-                const title = formatBadgeTitle(item.record, true, '');
+                const title = formatBadgeTitle(item.record, true, jobInfo.full);
                 if (title) titleLines.push(title);
             });
             if (!blocks.length) continue;
@@ -1958,6 +1973,8 @@
                 return;
             }
 
+            const accountRecords = await listRecordsByAccount(state.accountKey);
+            const { companyJobs } = buildCompanyIndexes(accountRecords);
             const cards = collectCardCandidates();
             const pageHint = getPageStatusHint();
             for (const card of cards) {
@@ -1990,10 +2007,19 @@
                 const accountLabel = formatAccountLabel(best);
                 const badgeText = formatStatusAccount(status, accountLabel);
                 const blocks = [{ lines: [{ text: badgeText, className: `bp-badge-line ${statusClass}` }] }];
-                if (companyOnly && best.jobName) {
-                    blocks[0].lines.push({ text: `曾投：${best.jobName}`, className: 'bp-badge-sub' });
+                let jobListText = best.jobName || '';
+                if (companyOnly) {
+                    const companyKey = normalizeKey(best.companyName);
+                    const jobList = getCompanyJobs(companyJobs, companyKey, best.accountKey);
+                    const jobInfo = formatCompanyJobList(jobList, 2);
+                    jobListText = jobInfo.full || best.jobName || '';
+                    if (jobList.length > 1 && jobInfo.inline) {
+                        blocks[0].lines.push({ text: `曾投：${jobInfo.inline}`, className: 'bp-badge-sub' });
+                    } else if (best.jobName) {
+                        blocks[0].lines.push({ text: `曾投：${best.jobName}`, className: 'bp-badge-sub' });
+                    }
                 }
-                renderBadgeBlocks(badge, blocks, [formatBadgeTitle(best, companyOnly, best.jobName || '')].filter(Boolean));
+                renderBadgeBlocks(badge, blocks, [formatBadgeTitle(best, companyOnly, jobListText)].filter(Boolean));
             }
 
             const detail = document.querySelector('.job-detail, .job-detail-wrapper, .job-detail-content, .job-detail-header');
@@ -2030,7 +2056,14 @@
                             const accountLabel = formatAccountLabel(best);
                             const badgeText = formatStatusAccount(status, accountLabel);
                             badge.textContent = badgeText;
-                            const title = formatBadgeTitle(best, companyOnly, best.jobName || '');
+                            let jobListText = best.jobName || '';
+                            if (companyOnly) {
+                                const companyKey = normalizeKey(best.companyName);
+                                const jobList = getCompanyJobs(companyJobs, companyKey, best.accountKey);
+                                const jobInfo = formatCompanyJobList(jobList, 3);
+                                jobListText = jobInfo.full || best.jobName || '';
+                            }
+                            const title = formatBadgeTitle(best, companyOnly, jobListText);
                             if (title) {
                                 badge.title = title;
                             }
