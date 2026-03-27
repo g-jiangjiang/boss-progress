@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.4.17
+// @version      0.4.19
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -234,10 +234,22 @@
             .replace(/\s*（[^）]+）/g, '');
     }
 
+    function stripJobNoise(text) {
+        return normalizeText(text)
+            .replace(/\d+\s*[-~]\s*\d+\s*[kK万千][^\s]*/g, '')
+            .replace(/\d+\s*[-~]\s*\d+\s*薪/g, '');
+    }
+
+    function normalizeJobKey(text, loose) {
+        const cleaned = stripJobNoise(text);
+        const finalText = loose ? stripBracketText(cleaned) : cleaned;
+        return normalizeKey(finalText);
+    }
+
     function buildTextKey(companyName, jobName, loose) {
         if (!companyName || !jobName) return '';
         const companyKey = normalizeKey(companyName);
-        const jobKey = loose ? normalizeKey(stripBracketText(jobName)) : normalizeKey(jobName);
+        const jobKey = normalizeJobKey(jobName, loose);
         if (!companyKey || !jobKey) return '';
         return `${companyKey}|${jobKey}`;
     }
@@ -1720,6 +1732,36 @@
         return { companyIndex, companyJobs };
     }
 
+    function buildCompanyJobIndex(records) {
+        const companyJobIndex = new Map();
+        for (const record of records || []) {
+            if (!record || !record.companyName || !record.jobName) continue;
+            const companyKey = normalizeKey(record.companyName);
+            if (!companyKey) continue;
+            const jobExact = normalizeJobKey(record.jobName, false);
+            const jobLoose = normalizeJobKey(record.jobName, true);
+            const keys = Array.from(new Set([jobExact, jobLoose].filter(Boolean)));
+            if (!keys.length) continue;
+            let jobMap = companyJobIndex.get(companyKey);
+            if (!jobMap) {
+                jobMap = new Map();
+                companyJobIndex.set(companyKey, jobMap);
+            }
+            keys.forEach((jobKey) => {
+                let accountMap = jobMap.get(jobKey);
+                if (!accountMap) {
+                    accountMap = new Map();
+                    jobMap.set(jobKey, accountMap);
+                }
+                const existing = accountMap.get(record.accountKey);
+                if (!existing || statusRank(record.flags || {}) >= statusRank(existing.flags || {})) {
+                    accountMap.set(record.accountKey, record);
+                }
+            });
+        }
+        return companyJobIndex;
+    }
+
     function getCompanyJobs(companyJobs, companyKey, accountKey) {
         if (!companyJobs || !companyKey) return [];
         const map = companyJobs.get(companyKey);
@@ -1783,8 +1825,8 @@
             const exactKey = buildTextKey(record.companyName, record.jobName, false);
             const looseKey = buildTextKey(record.companyName, record.jobName, true);
             const companyKey = normalizeKey(record.companyName);
-            const jobExact = normalizeKey(record.jobName);
-            const jobLoose = normalizeKey(stripBracketText(record.jobName));
+            const jobExact = normalizeJobKey(record.jobName, false);
+            const jobLoose = normalizeJobKey(record.jobName, true);
             if (record.jobName) {
                 upsert(exactKey, record);
                 upsert(looseKey, record);
@@ -1817,8 +1859,8 @@
             } else {
                 const companyKey = normalizeKey(companyName);
                 const candidates = companyKey ? (byCompany.get(companyKey) || []) : [];
-                const jobExact = normalizeKey(jobName);
-                const jobLoose = normalizeKey(stripBracketText(jobName));
+                const jobExact = normalizeJobKey(jobName, false);
+                const jobLoose = normalizeJobKey(jobName, true);
                 for (const item of candidates) {
                     if (!item || !item.record) continue;
                     let hit = false;
@@ -1897,18 +1939,28 @@
     async function applyBadgesForChatPage() {
         const records = await listAllRecords();
         const { companyIndex, companyJobs } = buildCompanyIndexes(records);
+        const companyJobIndex = buildCompanyJobIndex(records);
         if (!companyIndex.size) return;
         const cards = collectChatCandidates();
         for (const card of cards) {
             if (!card || isInIgnoredArea(card)) continue;
             let { companyName } = extractJobCompanyText(card);
-            if (!companyName) {
-                const nameBox = card.querySelector('.name-box');
-                if (nameBox) {
-                    const spans = Array.from(nameBox.querySelectorAll('span')).map((el) => normalizeText(el.textContent || '')).filter(Boolean);
-                    const candidate = spans.length >= 2 ? spans[1] : '';
-                    if (isLikelyCompanyName(candidate)) companyName = candidate;
+            let jobName = '';
+            const nameBox = card.querySelector('.name-box');
+            if (nameBox) {
+                const spans = Array.from(nameBox.querySelectorAll('span')).map((el) => normalizeText(el.textContent || '')).filter(Boolean);
+                if (spans.length >= 2 && isLikelyCompanyName(spans[1])) {
+                    companyName = spans[1];
                 }
+                if (spans.length >= 3 && isLikelyJobName(spans[2])) {
+                    jobName = spans[2];
+                } else if (spans.length >= 2) {
+                    const last = spans[spans.length - 1];
+                    if (isLikelyJobName(last)) jobName = last;
+                }
+            }
+            if (!companyName) {
+                // no-op
             }
             if (!companyName) {
                 const line = card.querySelector('.name, .title, .company, .text, .desc, .content, .name-box');
@@ -1919,9 +1971,28 @@
             const companyKey = normalizeKey(companyName);
             if (!companyKey || !companyIndex.has(companyKey)) continue;
             const accountMap = companyIndex.get(companyKey);
-            const matchedItems = Array.from(accountMap.values())
-                .filter((record) => shouldShowChatStatus(record))
-                .map((record) => ({ record, companyOnly: true }));
+            const jobMatchesByAccount = new Map();
+            const jobExact = normalizeJobKey(jobName, false);
+            const jobLoose = normalizeJobKey(jobName, true);
+            const jobMap = companyJobIndex.get(companyKey);
+            if (jobMap) {
+                const exactMap = jobExact ? jobMap.get(jobExact) : null;
+                const looseMap = !exactMap && jobLoose ? jobMap.get(jobLoose) : null;
+                const hitMap = exactMap || looseMap;
+                if (hitMap) {
+                    hitMap.forEach((record, accountKey) => {
+                        if (shouldShowChatStatus(record)) {
+                            jobMatchesByAccount.set(accountKey, record);
+                        }
+                    });
+                }
+            }
+            const matchedItems = [
+                ...Array.from(jobMatchesByAccount.values()).map((record) => ({ record, companyOnly: false })),
+                ...Array.from(accountMap.values())
+                    .filter((record) => shouldShowChatStatus(record) && !jobMatchesByAccount.has(record.accountKey))
+                    .map((record) => ({ record, companyOnly: true }))
+            ];
             if (!matchedItems.length) continue;
             ensurePositioned(card);
             matchedItems.sort((a, b) => statusRank(b.record?.flags || {}) - statusRank(a.record?.flags || {}));
