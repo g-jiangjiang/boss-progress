@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.4.19
+// @version      0.5.5
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -15,8 +15,10 @@
     'use strict';
 
     const DB_NAME = 'boss_progress_db';
-    const DB_VERSION = 1;
+    const DB_VERSION = 2;
     const STORE_RECORDS = 'records';
+    const STORE_COMPANY_BLACKLIST = 'companyBlacklist';
+    const STORE_BOSS_BLACKLIST = 'bossBlacklist';
     const STORE_META = 'meta';
     const PANEL_ID = 'boss-progress-panel';
     const BADGE_CLASS = 'boss-progress-badge';
@@ -33,6 +35,9 @@
         searchQuery: '',
         statusFilter: 'all',
         accountFilter: 'all',
+        dataView: 'progress',
+        syncStatus: '',
+        activeShieldDialogSource: '',
         enableNetwork: false,
         tabStatusMap: {}
     };
@@ -51,6 +56,19 @@
                     store.createIndex('by_account', 'accountKey', { unique: false });
                     store.createIndex('by_job', ['accountKey', 'jobId'], { unique: false });
                     store.createIndex('by_company', ['accountKey', 'companyId'], { unique: false });
+                    store.createIndex('by_updated', 'updatedAt', { unique: false });
+                }
+                if (!db.objectStoreNames.contains(STORE_COMPANY_BLACKLIST)) {
+                    const store = db.createObjectStore(STORE_COMPANY_BLACKLIST, { keyPath: 'id' });
+                    store.createIndex('by_account', 'accountKey', { unique: false });
+                    store.createIndex('by_company_key', ['accountKey', 'companyKey'], { unique: false });
+                    store.createIndex('by_updated', 'updatedAt', { unique: false });
+                }
+                if (!db.objectStoreNames.contains(STORE_BOSS_BLACKLIST)) {
+                    const store = db.createObjectStore(STORE_BOSS_BLACKLIST, { keyPath: 'id' });
+                    store.createIndex('by_account', 'accountKey', { unique: false });
+                    store.createIndex('by_boss_key', ['accountKey', 'bossKey'], { unique: false });
+                    store.createIndex('by_company_boss', ['accountKey', 'companyKey', 'bossKey'], { unique: false });
                     store.createIndex('by_updated', 'updatedAt', { unique: false });
                 }
                 if (!db.objectStoreNames.contains(STORE_META)) {
@@ -175,6 +193,24 @@
         return /\/web\/geek\/jobs/.test(location.pathname || '');
     }
 
+    function isPrivacySetPage() {
+        return /\/web\/geek\/privacy-set/.test(location.pathname || '');
+    }
+
+    function isShieldCompanyPage() {
+        return isPrivacySetPage() && getUrlParam('type') === 'shieldCompany';
+    }
+
+    function isBossBlacklistPage() {
+        return isPrivacySetPage() && getUrlParam('type') === 'bossBlacklist';
+    }
+
+    function detectDataViewFromPage() {
+        if (isShieldCompanyPage()) return 'companyBlacklist';
+        if (isBossBlacklistPage()) return 'bossBlacklist';
+        return state.dataView || 'progress';
+    }
+
     function getRecommendTab() {
         return getUrlParam('tab');
     }
@@ -221,6 +257,22 @@
             .replace(/[\s·•\u00b7·|]/g, '')
             .replace(/[()\[\]{}（）]/g, '')
             .replace(/[-–—_]/g, '');
+    }
+
+    function normalizeBossName(text) {
+        return normalizeText(text)
+            .replace(/(先生|女士|小姐|老板|Boss|BOSS|HR|人事|招聘|经理|主管|负责人|专员|顾问|总监|CTO|CEO|HRBP)/ig, '')
+            .replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '')
+            .toLowerCase();
+    }
+
+    function extractBossName(text) {
+        const normalized = normalizeText(text);
+        if (!normalized) return '';
+        const honorific = normalized.match(/([\u4e00-\u9fa5A-Za-z]{1,8})(先生|女士|小姐)/);
+        if (honorific) return `${honorific[1]}${honorific[2]}`;
+        const first = normalized.split(/[｜|·\-\s]/).find((part) => normalizeBossName(part).length >= 1 && normalizeBossName(part).length <= 8);
+        return first || normalized;
     }
 
     function isChatPage() {
@@ -531,6 +583,35 @@
         await withStore(STORE_RECORDS, 'readwrite', (store) => {
             store.delete(id);
         });
+    }
+
+    function buildCompanyBlacklistId(accountKey, companyKey) {
+        return [accountKey, 'companyBlacklist', companyKey || 'unknown'].join('|');
+    }
+
+    function buildBossBlacklistId(accountKey, companyKey, bossKey) {
+        return [accountKey, 'bossBlacklist', companyKey || 'unknown', bossKey || 'unknown'].join('|');
+    }
+
+    async function deleteBlacklistById(storeName, id) {
+        if (!id) return;
+        await withStore(storeName, 'readwrite', (store) => {
+            store.delete(id);
+        });
+    }
+
+    async function clearStoreByAccount(storeName, accountKey) {
+        const records = await listStoreByAccount(storeName, accountKey);
+        await withStore(storeName, 'readwrite', (store) => {
+            records.forEach((record) => store.delete(record.id));
+        });
+        return records.length;
+    }
+
+    function getDataViewLabel(view) {
+        if (view === 'companyBlacklist') return '屏蔽公司';
+        if (view === 'bossBlacklist') return '拉黑Boss';
+        return '投递记录';
     }
 
     function buildRecordId(accountKey, scope, companyId, jobId) {
@@ -851,6 +932,61 @@
         });
     }
 
+    async function listStoreByAccount(storeName, accountKey) {
+        return withStore(storeName, 'readonly', (store) => {
+            return new Promise((resolve, reject) => {
+                const index = store.index('by_account');
+                const req = index.openCursor(IDBKeyRange.only(accountKey));
+                const results = [];
+                req.onsuccess = () => {
+                    const cursor = req.result;
+                    if (cursor) {
+                        results.push(cursor.value);
+                        cursor.continue();
+                    } else {
+                        resolve(results);
+                    }
+                };
+                req.onerror = () => reject(req.error);
+            });
+        });
+    }
+
+    async function listAllFromStore(storeName) {
+        return withStore(storeName, 'readonly', (store) => {
+            return new Promise((resolve, reject) => {
+                const req = store.openCursor();
+                const results = [];
+                req.onsuccess = () => {
+                    const cursor = req.result;
+                    if (cursor) {
+                        results.push(cursor.value);
+                        cursor.continue();
+                    } else {
+                        resolve(results);
+                    }
+                };
+                req.onerror = () => reject(req.error);
+            });
+        });
+    }
+
+    async function upsertStoreRecord(storeName, record) {
+        return withStore(storeName, 'readwrite', (store) => {
+            store.put(record);
+        });
+    }
+
+    async function getStoreRecord(storeName, id) {
+        return withStore(storeName, 'readonly', (store) => {
+            return new Promise((resolve, reject) => {
+                const req = store.get(id);
+                req.onsuccess = () => resolve(req.result || null);
+                req.onerror = () => reject(req.error);
+            });
+        });
+    }
+
     async function upsertRecord(record) {
         return withStore(STORE_RECORDS, 'readwrite', (store) => {
             store.put(record);
@@ -896,6 +1032,50 @@
         scheduleRefresh();
     }
 
+    async function mergeAndSaveCompanyBlacklist(incoming) {
+        if (!incoming || !incoming.accountKey || !incoming.companyName) return;
+        if (!isBlacklistCompanyName(incoming.companyName)) return;
+        incoming.companyKey = incoming.companyKey || normalizeKey(incoming.companyName);
+        if (!incoming.companyKey) return;
+        incoming.id = buildCompanyBlacklistId(incoming.accountKey, incoming.companyKey);
+        const existing = await getStoreRecord(STORE_COMPANY_BLACKLIST, incoming.id);
+        const existingSources = String(existing?.sourceTypes || '').split(/[、,]/).map((v) => v.trim()).filter(Boolean);
+        const incomingSources = String(incoming.sourceTypes || incoming.sourceType || '').split(/[、,]/).map((v) => v.trim()).filter(Boolean);
+        const hasNewSource = incomingSources.some((source) => !existingSources.includes(source));
+        const sourceTypes = new Set([
+            ...existingSources,
+            ...incomingSources
+        ]);
+        const record = {
+            ...existing,
+            ...incoming,
+            accountLabel: incoming.accountLabel || existing?.accountLabel || state.accountLabel,
+            sourceTypes: Array.from(sourceTypes).join('、') || incoming.sourceType || existing?.sourceTypes || '',
+            updatedAt: existing && !hasNewSource ? existing.updatedAt : (incoming.updatedAt || Date.now())
+        };
+        record.searchText = normalizeText(`${record.companyName || ''} ${record.sourceTypes || ''} ${record.accountLabel || ''}`);
+        await upsertStoreRecord(STORE_COMPANY_BLACKLIST, record);
+    }
+
+    async function mergeAndSaveBossBlacklist(incoming) {
+        if (!incoming || !incoming.accountKey || !incoming.bossName) return;
+        incoming.companyKey = incoming.companyKey || normalizeKey(incoming.companyName);
+        incoming.bossKey = incoming.bossKey || normalizeBossName(incoming.bossName);
+        if (!incoming.bossKey) return;
+        incoming.id = buildBossBlacklistId(incoming.accountKey, incoming.companyKey, incoming.bossKey);
+        const existing = await getStoreRecord(STORE_BOSS_BLACKLIST, incoming.id);
+        const record = {
+            ...existing,
+            ...incoming,
+            accountLabel: incoming.accountLabel || existing?.accountLabel || state.accountLabel,
+            companyName: incoming.companyName || existing?.companyName || '',
+            title: incoming.title || existing?.title || '',
+            updatedAt: Math.max(existing?.updatedAt || 0, incoming.updatedAt || Date.now())
+        };
+        record.searchText = normalizeText(`${record.bossName || ''} ${record.companyName || ''} ${record.title || ''} ${record.accountLabel || ''}`);
+        await upsertStoreRecord(STORE_BOSS_BLACKLIST, record);
+    }
+
     async function findBestRecord(accountKey, jobId, companyId) {
         if (jobId) {
             const record = await getRecordByIndex('by_job', [accountKey, jobId]);
@@ -923,11 +1103,16 @@
         panel.id = PANEL_ID;
         panel.innerHTML = `
       <div class="bp-header">
-        <div class="bp-title">投递进度</div>
+        <div class="bp-title">BOSS记录</div>
         <button class="bp-toggle" title="收起/展开">≡</button>
       </div>
       <div class="bp-body">
         <div class="bp-account">账号：<span class="bp-account-label"></span> <button class="bp-set-account">设置</button></div>
+        <div class="bp-view-switch">
+          <button class="bp-view-btn" data-view="progress">投递</button>
+          <button class="bp-view-btn" data-view="companyBlacklist">屏蔽公司</button>
+          <button class="bp-view-btn" data-view="bossBlacklist">拉黑Boss</button>
+        </div>
         <div class="bp-actions">
           <button class="bp-sync">同步页面</button>
           <button class="bp-export">导出CSV</button>
@@ -937,8 +1122,9 @@
           <button class="bp-clear">清空数据</button>
           <button class="bp-network"></button>
         </div>
+        <div class="bp-sync-status"></div>
         <div class="bp-tip">接口采集可能触发风控，建议必要时手动开启。</div>
-        <div class="bp-tab">
+        <div class="bp-tab bp-progress-only">
           <div class="bp-tab-label">当前页签状态</div>
           <div class="bp-tab-buttons">
             <button class="bp-tab-btn" data-status="auto">自动</button>
@@ -949,7 +1135,7 @@
           <div class="bp-tab-hint"></div>
         </div>
         <input class="bp-search" placeholder="搜索 公司 / 岗位 / 状态" />
-        <div class="bp-filter">
+        <div class="bp-filter bp-progress-only">
           <label>状态筛选</label>
           <select class="bp-status-filter">
             <option value="all">全部</option>
@@ -980,10 +1166,14 @@
       #${PANEL_ID} .bp-body { background: #ffffff; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; padding: 10px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.15); }
       #${PANEL_ID} .bp-account { margin-bottom: 8px; }
       #${PANEL_ID} .bp-account button { margin-left: 6px; }
+      #${PANEL_ID} .bp-view-switch { display: flex; gap: 6px; margin-bottom: 8px; }
+      #${PANEL_ID} .bp-view-switch button { flex: 1; }
+      #${PANEL_ID} .bp-view-switch button.active { background: #0f766e; border-color: #0f766e; color: #fff; }
       #${PANEL_ID} .bp-actions { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
       #${PANEL_ID} .bp-actions button { flex: 1; }
       #${PANEL_ID} .bp-actions-secondary { margin-top: -2px; }
       #${PANEL_ID} .bp-actions-secondary button { flex: 1; }
+      #${PANEL_ID} .bp-sync-status { color: #0f766e; margin-bottom: 6px; min-height: 16px; }
       #${PANEL_ID} .bp-tip { color: #94a3b8; margin-bottom: 8px; }
       #${PANEL_ID} .bp-tab { margin-bottom: 8px; }
       #${PANEL_ID} .bp-tab-label { color: #64748b; margin-bottom: 4px; }
@@ -1014,11 +1204,15 @@
       .bp-status-delivered { background: #ffedd5; color: #9a3412; }
       .bp-status-interviewed { background: #dcfce7; color: #166534; }
       .bp-status-favorite { background: #f3e8ff; color: #6b21a8; }
+      .bp-status-company-blacklist { background: #fee2e2; color: #991b1b; }
+      .bp-status-boss-blacklist { background: #fce7f3; color: #9d174d; }
       .bp-status-unknown { background: #f1f5f9; color: #334155; }
       .${BADGE_CLASS} .bp-badge-line.bp-status-communicated { background: #e0f2fe !important; color: #0369a1 !important; }
       .${BADGE_CLASS} .bp-badge-line.bp-status-delivered { background: #ffedd5 !important; color: #9a3412 !important; }
       .${BADGE_CLASS} .bp-badge-line.bp-status-interviewed { background: #dcfce7 !important; color: #166534 !important; }
       .${BADGE_CLASS} .bp-badge-line.bp-status-favorite { background: #f3e8ff !important; color: #6b21a8 !important; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-company-blacklist { background: #fee2e2 !important; color: #991b1b !important; }
+      .${BADGE_CLASS} .bp-badge-line.bp-status-boss-blacklist { background: #fce7f3 !important; color: #9d174d !important; }
       .${BADGE_CLASS} .bp-badge-line.bp-status-unknown { background: #f1f5f9 !important; color: #334155 !important; }
       .boss-progress-has-badge::before,
       .boss-progress-has-badge::after,
@@ -1044,18 +1238,41 @@
                 await setAccountLabel(label.trim() || '未命名账号');
             }
         });
-        panel.querySelector('.bp-sync').addEventListener('click', () => {
-            if (!isTargetRecommendTabPage()) {
-                alert('仅支持在投递进度页（recommend?tab=1-4）同步。');
-                return;
+        panel.querySelectorAll('.bp-view-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                state.dataView = btn.dataset.view || 'progress';
+                renderPanel();
+            });
+        });
+        panel.querySelector('.bp-sync').addEventListener('click', async () => {
+            try {
+                if (isShieldCompanyPage()) {
+                    state.dataView = 'companyBlacklist';
+                    await syncShieldCompanyPage();
+                    return;
+                }
+                if (isBossBlacklistPage()) {
+                    state.dataView = 'bossBlacklist';
+                    await syncBossBlacklistPage();
+                    return;
+                }
+                if (!isTargetRecommendTabPage()) {
+                    alert('投递数据仅支持在投递进度页（recommend?tab=1-4）同步；黑名单请到隐私保护页面同步。');
+                    return;
+                }
+                state.dataView = 'progress';
+                scanDom();
+            } catch (err) {
+                log('sync failed', err);
+                state.syncStatus = '同步失败，详情看控制台';
+                renderPanel();
             }
-            scanDom();
         });
         panel.querySelector('.bp-export').addEventListener('click', exportCsv);
         panel.querySelector('.bp-import').addEventListener('click', () => {
             panel.querySelector('.bp-file').click();
         });
-        panel.querySelector('.bp-clear').addEventListener('click', clearDatabase);
+        panel.querySelector('.bp-clear').addEventListener('click', clearCurrentData);
         panel.querySelector('.bp-network').addEventListener('click', async () => {
             const next = !state.enableNetwork;
             const message = next
@@ -1106,14 +1323,91 @@
         });
     }
 
+    function renderAccountOptions(panel, records) {
+        const accountSelect = panel.querySelector('.bp-account-filter');
+        if (!accountSelect) return;
+        const labels = Array.from(new Set(records.map((record) => formatAccountLabel(record)).filter(Boolean)));
+        labels.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+        if (state.accountFilter !== 'all' && !labels.includes(state.accountFilter)) {
+            state.accountFilter = 'all';
+        }
+        accountSelect.innerHTML = '';
+        ['all', ...labels].forEach((value) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value === 'all' ? '全部' : value;
+            accountSelect.appendChild(option);
+        });
+        accountSelect.value = state.accountFilter || 'all';
+    }
+
+    function renderListItems(panel, records, renderRecord, deleteRecord, sortFn) {
+        const list = panel.querySelector('.bp-list');
+        list.innerHTML = '';
+        const sorter = sortFn || ((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        const visible = records.slice().sort(sorter);
+        if (visible.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = '暂无记录';
+            empty.className = 'bp-item-sub';
+            list.appendChild(empty);
+            return;
+        }
+        for (const record of visible) {
+            const item = document.createElement('div');
+            item.className = 'bp-item';
+            const main = document.createElement('div');
+            main.className = 'bp-item-main';
+            const { titleText, subText } = renderRecord(record);
+            const title = document.createElement('div');
+            title.className = 'bp-item-title';
+            title.textContent = titleText;
+            const sub = document.createElement('div');
+            sub.className = 'bp-item-sub';
+            sub.textContent = subText;
+            main.appendChild(title);
+            main.appendChild(sub);
+            item.appendChild(main);
+            const delBtn = document.createElement('button');
+            delBtn.className = 'bp-item-delete';
+            delBtn.textContent = '删除';
+            delBtn.addEventListener('click', async () => {
+                const ok = confirm('确认删除这条记录？');
+                if (!ok) return;
+                await deleteRecord(record);
+                scheduleRefresh();
+            });
+            item.appendChild(delBtn);
+            list.appendChild(item);
+        }
+    }
+
     async function renderPanel() {
         const panel = document.getElementById(PANEL_ID);
         if (!panel) return;
         panel.querySelector('.bp-account-label').textContent = state.accountLabel || '未命名账号';
+        panel.querySelector('.bp-sync-status').textContent = state.syncStatus || '';
+        const clearBtn = panel.querySelector('.bp-clear');
+        if (clearBtn) clearBtn.textContent = `清空${getDataViewLabel(state.dataView)}`;
+        const searchInput = panel.querySelector('.bp-search');
+        if (searchInput) {
+            searchInput.placeholder = state.dataView === 'bossBlacklist'
+                ? '搜索 Boss / 公司 / 职位'
+                : state.dataView === 'companyBlacklist'
+                    ? '搜索 公司 / 来源'
+                    : '搜索 公司 / 岗位 / 状态';
+        }
+        panel.querySelectorAll('.bp-view-btn').forEach((btn) => {
+            btn.classList.toggle('active', btn.dataset.view === state.dataView);
+        });
+        panel.querySelectorAll('.bp-progress-only').forEach((el) => {
+            el.style.display = state.dataView === 'progress' ? '' : 'none';
+        });
         const networkBtn = panel.querySelector('.bp-network');
         if (networkBtn) {
             networkBtn.textContent = state.enableNetwork ? '接口采集：开' : '接口采集：关';
         }
+
         const tabHintEl = panel.querySelector('.bp-tab-hint');
         if (tabHintEl) {
             const pageHint = getPageStatusHint();
@@ -1133,87 +1427,74 @@
             tabHintEl.textContent = `当前${getTabKeyLabel()} · 识别: ${statusLabel} (${sourceLabel})${mapLabel}`;
         }
 
-        const records = await listRecordsByAccount(state.accountKey);
+        const storeName = state.dataView === 'companyBlacklist'
+            ? STORE_COMPANY_BLACKLIST
+            : state.dataView === 'bossBlacklist'
+                ? STORE_BOSS_BLACKLIST
+                : STORE_RECORDS;
+        let records = state.dataView === 'progress'
+            ? await listRecordsByAccount(state.accountKey)
+            : await listStoreByAccount(storeName, state.accountKey);
+        if (state.dataView === 'companyBlacklist') {
+            records = records.filter((record) => isBlacklistCompanyName(record.companyName || ''));
+        }
         let filtered = state.searchQuery
             ? records.filter((record) => (record.searchText || '').toLowerCase().includes(state.searchQuery))
-            : records;
-        if (state.statusFilter && state.statusFilter !== 'all') {
+            : records.slice();
+        if (state.dataView === 'progress' && state.statusFilter && state.statusFilter !== 'all') {
             filtered = filtered.filter((record) => record.statusText === state.statusFilter);
         }
         if (state.accountFilter && state.accountFilter !== 'all') {
             filtered = filtered.filter((record) => formatAccountLabel(record) === state.accountFilter);
+        }
+        renderAccountOptions(panel, records);
+
+        const stats = panel.querySelector('.bp-stats');
+        const statusSelect = panel.querySelector('.bp-status-filter');
+        if (statusSelect && statusSelect.value !== state.statusFilter) {
+            statusSelect.value = state.statusFilter || 'all';
+        }
+
+        if (state.dataView === 'companyBlacklist') {
+            const manual = records.filter((r) => /手动屏蔽/.test(r.sourceTypes || '')).length;
+            const auto = records.filter((r) => /简历自动屏蔽/.test(r.sourceTypes || '')).length;
+            const smart = records.filter((r) => /智能屏蔽/.test(r.sourceTypes || '')).length;
+            stats.textContent = `屏蔽公司 ${records.length} · 手动 ${manual} · 自动 ${auto} · 智能 ${smart}`;
+            renderListItems(panel, filtered, (record) => ({
+                titleText: record.companyName || '未知公司',
+                subText: `账号:${formatAccountLabel(record)} · ${record.sourceTypes || '屏蔽公司'}`
+            }), (record) => deleteBlacklistById(STORE_COMPANY_BLACKLIST, record.id), (a, b) => {
+                const sourceCompare = String(a.sourceTypes || '').localeCompare(String(b.sourceTypes || ''), 'zh-Hans-CN');
+                if (sourceCompare !== 0) return sourceCompare;
+                return String(a.companyName || '').localeCompare(String(b.companyName || ''), 'zh-Hans-CN');
+            });
+            return;
+        }
+
+        if (state.dataView === 'bossBlacklist') {
+            stats.textContent = `拉黑Boss ${records.length}`;
+            renderListItems(panel, filtered, (record) => ({
+                titleText: `${record.bossName || '未知Boss'}${record.companyName ? ' · ' + record.companyName : ''}`,
+                subText: `账号:${formatAccountLabel(record)}${record.title ? ' · ' + record.title : ''}`
+            }), (record) => deleteBlacklistById(STORE_BOSS_BLACKLIST, record.id));
+            return;
         }
 
         const total = records.length;
         const communicated = records.filter((r) => r.statusText === '已沟通').length;
         const delivered = records.filter((r) => r.statusText === '已投递').length;
         const interviewed = records.filter((r) => r.statusText === '已面试').length;
-
-        const stats = panel.querySelector('.bp-stats');
         stats.textContent = `总计 ${total} · 已沟通 ${communicated} · 已投递 ${delivered} · 已面试 ${interviewed}`;
-        const statusSelect = panel.querySelector('.bp-status-filter');
-        if (statusSelect && statusSelect.value !== state.statusFilter) {
-            statusSelect.value = state.statusFilter || 'all';
-        }
-        const accountSelect = panel.querySelector('.bp-account-filter');
-        if (accountSelect) {
-            const labels = Array.from(new Set(records.map((record) => formatAccountLabel(record)).filter(Boolean)));
-            labels.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
-            const options = ['all', ...labels];
-            if (state.accountFilter !== 'all' && !labels.includes(state.accountFilter)) {
-                state.accountFilter = 'all';
-            }
-            accountSelect.innerHTML = '';
-            options.forEach((value) => {
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = value === 'all' ? '全部' : value;
-                accountSelect.appendChild(option);
-            });
-            accountSelect.value = state.accountFilter || 'all';
-        }
-
-        const list = panel.querySelector('.bp-list');
-        list.innerHTML = '';
-        const sorted = filtered.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-        const visible = sorted.slice(0, 30);
-        if (visible.length === 0) {
-            const empty = document.createElement('div');
-            empty.textContent = '暂无记录';
-            empty.className = 'bp-item-sub';
-            list.appendChild(empty);
-            return;
-        }
-        for (const record of visible) {
-            const item = document.createElement('div');
-            item.className = 'bp-item';
-            const main = document.createElement('div');
-            main.className = 'bp-item-main';
-            const title = document.createElement('div');
-            title.className = 'bp-item-title';
-            title.textContent = `${record.companyName || '未知公司'}${record.jobName ? ' · ' + record.jobName : ''}`;
-            const sub = document.createElement('div');
-            sub.className = 'bp-item-sub';
+        renderListItems(panel, filtered, (record) => {
             const accountLabel = formatAccountLabel(record);
             const accountInfo = accountLabel ? `账号:${accountLabel} · ` : '';
             const hrLabel = record.hrInfo ? ` · HR:${record.hrInfo}` : '';
             const interviewLabel = record.interviewTime ? ` · 面试:${record.interviewTime}` : '';
-            sub.textContent = `${accountInfo}${record.statusText || '无状态'} · ${record.scope === 'job' ? '岗位记录' : '公司记录'}${hrLabel}${interviewLabel}`;
-            main.appendChild(title);
-            main.appendChild(sub);
-            item.appendChild(main);
-            const delBtn = document.createElement('button');
-            delBtn.className = 'bp-item-delete';
-            delBtn.textContent = '删除';
-            delBtn.addEventListener('click', async () => {
-                const ok = confirm('确认删除这条记录？');
-                if (!ok) return;
-                await deleteRecordById(record.id);
-                scheduleRefresh();
-            });
-            item.appendChild(delBtn);
-            list.appendChild(item);
-        }
+            return {
+                titleText: `${record.companyName || '未知公司'}${record.jobName ? ' · ' + record.jobName : ''}`,
+                subText: `${accountInfo}${record.statusText || '无状态'} · ${record.scope === 'job' ? '岗位记录' : '公司记录'}${hrLabel}${interviewLabel}`
+            };
+        }, (record) => deleteRecordById(record.id));
     }
 
     function parseHrefIds(href) {
@@ -1473,6 +1754,461 @@
         };
     }
 
+    function wait(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function isVisible(el) {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+    }
+
+    function setSyncStatus(text) {
+        state.syncStatus = text || '';
+        renderPanel();
+    }
+
+    function isBlacklistCompanyName(text) {
+        const value = normalizeText(text);
+        if (!value || value.length < 2 || value.length > 45) return false;
+        if (/北京华品博睿网络技术有限公司|看准|BOSS直聘/.test(value)) return false;
+        if (/查看|更多|解除|屏蔽|隐私|保护|搜索|添加|清空|批量|管理|列表|Boss|BOSS|无法|在线|历史|提醒|账号|筛选|同步|导出|导入|接口采集|投递进度|暂无记录|设置|违法|不良|举报|邮箱|未成年人|渠道|帮助|协议|客服/.test(value)) return false;
+        if (/公司地址|地址|办公地址|所在地址|联系地址|详细地址/.test(value)) return false;
+        if (/\d+号|\d+楼|\d+层|\d+室|\d+单元|\d+栋|\d+座|号院|大厦|园区|写字楼/.test(value) && !/(公司|有限公司|集团)$/.test(value)) return false;
+        if (/^[a-z0-9_\-]+$/i.test(value)) return false;
+        return /(公司|集团|科技|网络|信息|有限公司|股份|工作室|研究院|医院|银行|证券|基金|软件|咨询|传媒|物流|教育|医疗|数据|智能|通信|电子|互联|数科|资本|文化|电商|贸易|商务|服务|实业)/.test(value);
+    }
+
+    function getDirectText(el) {
+        if (!el) return '';
+        const texts = [];
+        el.childNodes.forEach((node) => {
+            if (node.nodeType === Node.TEXT_NODE) texts.push(node.textContent || '');
+        });
+        if (texts.join('').trim()) return normalizeText(texts.join(' '));
+        if (!el.children || el.children.length === 0) return normalizeText(el.textContent || '');
+        return '';
+    }
+
+    function collectCompanyNamesFromRoot(root) {
+        const names = new Set();
+        if (!root) return [];
+        root.querySelectorAll('li, p, span, div').forEach((el) => {
+            if (isInIgnoredArea(el)) return;
+            if (!isVisible(el)) return;
+            const text = getDirectText(el);
+            if (isBlacklistCompanyName(text)) names.add(text);
+        });
+        return Array.from(names);
+    }
+
+    function getShieldSourceLabels() {
+        return ['简历自动屏蔽', '手动屏蔽', '智能屏蔽'];
+    }
+
+    function findShieldHeadings() {
+        const headings = [];
+        const labels = getShieldSourceLabels();
+        Array.from(document.querySelectorAll('h1,h2,h3,h4,div,span,p')).forEach((el) => {
+            if (isInIgnoredArea(el) || !isVisible(el)) return;
+            const text = normalizeText(el.textContent || '');
+            const label = labels.find((item) => text.includes(item));
+            if (!label) return;
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 520 || rect.height > 80) return;
+            headings.push({ el, label, top: rect.top, bottom: rect.bottom });
+        });
+        headings.sort((a, b) => a.top - b.top);
+        const unique = [];
+        headings.forEach((heading) => {
+            const existing = unique.find((item) => item.label === heading.label && Math.abs(item.top - heading.top) < 24);
+            if (!existing) unique.push(heading);
+        });
+        return unique;
+    }
+
+    function findShieldSourceByY(y) {
+        const ranges = buildShieldSectionRanges();
+        let source = '';
+        for (const range of ranges) {
+            if (y > range.top && y < range.bottom) {
+                source = range.label;
+                break;
+            }
+        }
+        return source;
+    }
+
+    function buildShieldSectionRanges() {
+        const headings = findShieldHeadings();
+        const viewMoreButtons = findViewMoreButtons()
+            .map((el) => {
+                const rect = el.getBoundingClientRect();
+                return { el, top: rect.top, bottom: rect.bottom, source: '' };
+            })
+            .filter((item) => item.top > -20);
+
+        return headings.map((heading, index) => {
+            const nextHeading = headings[index + 1];
+            const nextTop = nextHeading ? nextHeading.top : Number.POSITIVE_INFINITY;
+            const viewMore = viewMoreButtons.find((btn) => btn.top > heading.bottom && btn.top < nextTop);
+            const bottom = viewMore ? viewMore.bottom + 12 : nextTop;
+            return {
+                label: heading.label,
+                top: heading.bottom,
+                bottom
+            };
+        }).filter((range) => Number.isFinite(range.bottom) && range.bottom > range.top);
+    }
+
+    function collectVisibleShieldCompaniesBySource() {
+        const ranges = buildShieldSectionRanges();
+        const result = new Map();
+        if (!ranges.length) return result;
+        const candidates = [];
+        document.querySelectorAll('li, p, span, div').forEach((el) => {
+            if (isInIgnoredArea(el) || !isVisible(el)) return;
+            const text = getDirectText(el);
+            if (!isBlacklistCompanyName(text)) return;
+            const rect = el.getBoundingClientRect();
+            candidates.push({ text, y: rect.top + rect.height / 2 });
+        });
+        candidates.forEach((item) => {
+            const range = ranges.find((itemRange) => item.y > itemRange.top && item.y < itemRange.bottom);
+            if (!range) return;
+            if (!result.has(range.label)) result.set(range.label, new Set());
+            result.get(range.label).add(item.text);
+        });
+        return result;
+    }
+
+    function findShieldSourceBefore(el) {
+        const rect = el.getBoundingClientRect();
+        return findShieldSourceByY(rect.top) || '屏蔽公司';
+    }
+
+    function findShieldSourceForAction(el) {
+        if (!el) return '屏蔽公司';
+        const rect = el.getBoundingClientRect();
+        const headings = findShieldHeadings();
+        let source = '';
+        for (const heading of headings) {
+            if (heading.top <= rect.bottom + 24) source = heading.label;
+        }
+        return source || findShieldSourceBefore(el);
+    }
+
+    function getShieldActionText(el) {
+        return normalizeText(el && el.textContent ? el.textContent : '');
+    }
+
+    function isShieldListActionText(text) {
+        const value = normalizeText(text);
+        return value.length <= 12 && /^(查看更多|批量管理)/.test(value);
+    }
+
+    function findShieldActionElement(target) {
+        let el = target && target.nodeType === 1 ? target : target && target.parentElement;
+        for (let i = 0; i < 6 && el; i += 1) {
+            if (isVisible(el) && isShieldListActionText(getShieldActionText(el))) return el;
+            el = el.parentElement;
+        }
+        return null;
+    }
+
+    function rememberShieldDialogSourceFromClick(target) {
+        const el = findShieldActionElement(target);
+        if (!el) return;
+        const sourceType = findShieldSourceForAction(el);
+        state.activeShieldDialogSource = sourceType;
+        setSyncStatus(`等待${sourceType}列表打开...`);
+        [650, 1300, 2200].forEach((delay) => setTimeout(() => scheduleScan(0), delay));
+    }
+
+    function findViewMoreButtons() {
+        return Array.from(document.querySelectorAll('button,a,span,div'))
+            .filter((el) => isVisible(el) && /^查看更多/.test(normalizeText(el.textContent || '')));
+    }
+
+    function findShieldListActionButtons() {
+        const result = [];
+        const seen = new Set();
+        Array.from(document.querySelectorAll('button,a,span,div')).forEach((el) => {
+            if (!isVisible(el) || !isShieldListActionText(getShieldActionText(el))) return;
+            const rect = el.getBoundingClientRect();
+            const key = `${Math.round(rect.left)}:${Math.round(rect.top)}:${getShieldActionText(el)}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            result.push(el);
+        });
+        return result.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    }
+
+    function isLikelyShieldDialogText(text) {
+        const value = normalizeText(text);
+        return value.includes('屏蔽公司列表')
+            || value.includes('解除屏蔽已选公司')
+            || (value.includes('解除屏蔽') && value.includes('全选'));
+    }
+
+    function expandShieldDialogRoot(el) {
+        const modal = el.closest('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="pop"], [class*="Dialog"], [class*="Modal"], [class*="Pop"]');
+        if (modal && isVisible(modal) && !isInIgnoredArea(modal)) return modal;
+        let current = el;
+        while (current && current.parentElement && current.parentElement !== document.body) {
+            const parent = current.parentElement;
+            if (!isVisible(parent) || isInIgnoredArea(parent)) break;
+            const rect = parent.getBoundingClientRect();
+            if (rect.width > window.innerWidth * 0.92 || rect.height > window.innerHeight * 0.92) break;
+            if (!isLikelyShieldDialogText(parent.textContent || '')) break;
+            current = parent;
+        }
+        return current || el;
+    }
+
+    function findShieldDialogRoot() {
+        const candidates = Array.from(document.querySelectorAll('div,section'))
+            .filter((el) => {
+                if (!isVisible(el) || isInIgnoredArea(el)) return false;
+                if (!isLikelyShieldDialogText(el.textContent || '')) return false;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 280 || rect.height < 160) return false;
+                if (rect.width > window.innerWidth * 0.96 || rect.height > window.innerHeight * 0.96) return false;
+                return true;
+            })
+            .map((el) => expandShieldDialogRoot(el))
+            .filter((el, index, list) => el && list.indexOf(el) === index);
+        if (!candidates.length) return null;
+        candidates.sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return (ar.width * ar.height) - (br.width * br.height);
+        });
+        return candidates[0];
+    }
+
+    function findScrollableContainer(root) {
+        const candidates = [root, ...Array.from(root ? root.querySelectorAll('*') : [])].filter(Boolean);
+        let best = null;
+        for (const el of candidates) {
+            if (!isVisible(el)) continue;
+            if (el.scrollHeight > el.clientHeight + 40) {
+                if (!best || el.scrollHeight > best.scrollHeight) best = el;
+            }
+        }
+        return best || document.scrollingElement || document.documentElement;
+    }
+
+    async function collectWithScroll(root, collectFn, statusPrefix) {
+        const container = findScrollableContainer(root);
+        const collected = new Set(collectFn(root || document));
+        let stable = 0;
+        for (let i = 0; i < 90 && stable < 4; i += 1) {
+            const before = collected.size;
+            if (container) container.scrollTop = container.scrollHeight;
+            await wait(450);
+            collectFn(root || document).forEach((value) => collected.add(value));
+            if (statusPrefix) setSyncStatus(`${statusPrefix} ${collected.size}`);
+            stable = collected.size === before ? stable + 1 : 0;
+        }
+        return Array.from(collected);
+    }
+
+    function closeDialog(root) {
+        if (!root) return;
+        const close = Array.from(root.querySelectorAll('button,span,i,div'))
+            .find((el) => isVisible(el) && /^(×|x|X|关闭)$/.test(normalizeText(el.textContent || el.getAttribute('aria-label') || '')));
+        if (close) {
+            close.click();
+            return;
+        }
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+
+    async function syncShieldCompanyPage() {
+        await ensureAccount();
+        const saved = new Map();
+        const sourceCounts = { '简历自动屏蔽': 0, '手动屏蔽': 0, '智能屏蔽': 0, '屏蔽公司': 0 };
+        const saveNames = async (names, sourceType) => {
+            for (const companyName of names) {
+                const companyKey = normalizeKey(companyName);
+                if (!companyKey) continue;
+                const key = `${companyKey}|${sourceType}`;
+                if (saved.has(key)) continue;
+                saved.set(key, true);
+                sourceCounts[sourceType] = (sourceCounts[sourceType] || 0) + 1;
+                await mergeAndSaveCompanyBlacklist({
+                    accountKey: state.accountKey,
+                    accountLabel: state.accountLabel,
+                    companyName,
+                    companyKey,
+                    sourceType,
+                    sourceTypes: sourceType,
+                    updatedAt: Date.now()
+                });
+            }
+        };
+
+        setSyncStatus('正在同步屏蔽公司...');
+        const visibleBySource = collectVisibleShieldCompaniesBySource();
+        for (const [sourceType, names] of visibleBySource.entries()) {
+            await saveNames(Array.from(names), sourceType);
+        }
+
+        const buttons = findShieldListActionButtons();
+        for (const btn of buttons) {
+            const sourceType = findShieldSourceForAction(btn);
+            state.activeShieldDialogSource = sourceType;
+            setSyncStatus(`打开${sourceType}列表...`);
+            btn.click();
+            await wait(900);
+            const dialog = findShieldDialogRoot();
+            if (!dialog) continue;
+            const names = await collectWithScroll(dialog, collectCompanyNamesFromRoot, `同步${sourceType}`);
+            await saveNames(names, sourceType);
+            closeDialog(dialog);
+            await wait(400);
+        }
+        setSyncStatus(`屏蔽公司同步完成：自动${sourceCounts['简历自动屏蔽'] || 0} / 手动${sourceCounts['手动屏蔽'] || 0} / 智能${sourceCounts['智能屏蔽'] || 0}`);
+        renderPanel();
+        applyBadges();
+    }
+
+    function findBossCardFromAction(action) {
+        let node = action;
+        for (let i = 0; i < 8 && node; i += 1) {
+            const text = normalizeText(node.textContent || '');
+            if (text.includes('解除') && text.length > 8 && text.length < 220) return node;
+            node = node.parentElement;
+        }
+        return action.closest('li, [class*="item"], [class*="row"]') || action.parentElement;
+    }
+
+    function extractBossBlacklistFromCard(card) {
+        if (!card) return null;
+        const texts = Array.from(card.querySelectorAll('span,div,p'))
+            .map((el) => normalizeText(el.textContent || ''))
+            .filter((text) => text && text.length < 60 && !/^解除$/.test(text));
+        const bossText = texts.find((text) => /先生|女士|小姐/.test(text)) || texts[0] || '';
+        const bossName = extractBossName(bossText);
+        const infoText = texts.find((text) => text !== bossText && /[·|｜\-]/.test(text)) || texts.find((text) => text !== bossText) || '';
+        const parts = infoText.split(/[·|｜]/).map((part) => normalizeText(part)).filter(Boolean);
+        const companyName = parts[0] || '';
+        const title = parts.slice(1).join(' · ') || '';
+        if (!bossName) return null;
+        return {
+            bossName,
+            bossKey: normalizeBossName(bossName),
+            companyName,
+            companyKey: normalizeKey(companyName),
+            title
+        };
+    }
+
+    function collectBossBlacklistFromRoot(root) {
+        const result = new Map();
+        Array.from((root || document).querySelectorAll('button,a,span,div')).forEach((el) => {
+            if (!isVisible(el) || normalizeText(el.textContent || '') !== '解除') return;
+            const record = extractBossBlacklistFromCard(findBossCardFromAction(el));
+            if (!record || !record.bossKey) return;
+            result.set(`${record.companyKey}|${record.bossKey}`, record);
+        });
+        return Array.from(result.values());
+    }
+
+    async function syncBossBlacklistPage() {
+        await ensureAccount();
+        setSyncStatus('正在同步拉黑Boss...');
+        const records = await collectWithScroll(document, collectBossBlacklistFromRoot, '同步拉黑Boss');
+        for (const record of records) {
+            await mergeAndSaveBossBlacklist({
+                ...record,
+                accountKey: state.accountKey,
+                accountLabel: state.accountLabel,
+                updatedAt: Date.now()
+            });
+        }
+        setSyncStatus(`拉黑Boss同步完成：${records.length}`);
+        renderPanel();
+        applyBadges();
+    }
+
+    async function saveVisibleShieldCompanies() {
+        await ensureAccount();
+        const dialog = findShieldDialogRoot();
+        if (dialog) {
+            const sourceType = state.activeShieldDialogSource || '屏蔽公司';
+            const names = collectCompanyNamesFromRoot(dialog);
+            let added = 0;
+            for (const companyName of names) {
+                const companyKey = normalizeKey(companyName);
+                if (!companyKey) continue;
+                const id = buildCompanyBlacklistId(state.accountKey, companyKey);
+                const existing = await getStoreRecord(STORE_COMPANY_BLACKLIST, id);
+                const hadSource = existing && String(existing.sourceTypes || '').split(/[、,]/).map((v) => v.trim()).includes(sourceType);
+                await mergeAndSaveCompanyBlacklist({
+                    accountKey: state.accountKey,
+                    accountLabel: state.accountLabel,
+                    companyName,
+                    companyKey,
+                    sourceType,
+                    sourceTypes: sourceType,
+                    updatedAt: Date.now()
+                });
+                if (!existing || !hadSource) added += 1;
+            }
+            const total = (await listStoreByAccount(STORE_COMPANY_BLACKLIST, state.accountKey)).length;
+            if (names.length) state.syncStatus = `已同步${sourceType}弹窗：新增${added}，总${total}`;
+            return;
+        }
+        const visibleBySource = collectVisibleShieldCompaniesBySource();
+        let added = 0;
+        let seen = 0;
+        for (const [sourceType, names] of visibleBySource.entries()) {
+            for (const companyName of names.values()) {
+                const companyKey = normalizeKey(companyName);
+                if (!companyKey) continue;
+                const id = buildCompanyBlacklistId(state.accountKey, companyKey);
+                const existing = await getStoreRecord(STORE_COMPANY_BLACKLIST, id);
+                const hadSource = existing && String(existing.sourceTypes || '').split(/[、,]/).map((v) => v.trim()).includes(sourceType);
+                await mergeAndSaveCompanyBlacklist({
+                    accountKey: state.accountKey,
+                    accountLabel: state.accountLabel,
+                    companyName,
+                    companyKey,
+                    sourceType,
+                    sourceTypes: sourceType,
+                    updatedAt: Date.now()
+                });
+                seen += 1;
+                if (!existing || !hadSource) added += 1;
+            }
+        }
+        const total = (await listStoreByAccount(STORE_COMPANY_BLACKLIST, state.accountKey)).length;
+        if (seen) state.syncStatus = `已同步当前可见屏蔽公司：新增${added}，总${total}`;
+    }
+
+    async function saveVisibleBossBlacklist() {
+        await ensureAccount();
+        const records = collectBossBlacklistFromRoot(document);
+        let added = 0;
+        for (const record of records) {
+            const id = buildBossBlacklistId(state.accountKey, record.companyKey, record.bossKey);
+            const existing = await getStoreRecord(STORE_BOSS_BLACKLIST, id);
+            await mergeAndSaveBossBlacklist({
+                ...record,
+                accountKey: state.accountKey,
+                accountLabel: state.accountLabel,
+                updatedAt: Date.now()
+            });
+            if (!existing) added += 1;
+        }
+        const total = (await listStoreByAccount(STORE_BOSS_BLACKLIST, state.accountKey)).length;
+        if (records.length) state.syncStatus = `已同步当前可见拉黑Boss：新增${added}，总${total}`;
+    }
+
     function looksLikeCard(node) {
         if (!node) return false;
         if (isInIgnoredArea(node)) return false;
@@ -1640,10 +2376,24 @@
         }
     }
 
-    function scanDom() {
+    async function scanDom() {
         const now = Date.now();
         if (now - state.lastScanAt < 800) return;
         state.lastScanAt = now;
+        if (isShieldCompanyPage()) {
+            state.dataView = state.dataView || 'companyBlacklist';
+            await saveVisibleShieldCompanies();
+            renderPanel();
+            applyBadges();
+            return;
+        }
+        if (isBossBlacklistPage()) {
+            state.dataView = state.dataView || 'bossBlacklist';
+            await saveVisibleBossBlacklist();
+            renderPanel();
+            applyBadges();
+            return;
+        }
         if (!isTargetRecommendTabPage()) {
             applyBadges();
             return;
@@ -1762,6 +2512,78 @@
         return companyJobIndex;
     }
 
+    async function buildPrivacyIndexes() {
+        const companyRecords = await listAllFromStore(STORE_COMPANY_BLACKLIST);
+        const bossRecords = await listAllFromStore(STORE_BOSS_BLACKLIST);
+        const companyIndex = new Map();
+        const bossIndex = new Map();
+
+        for (const record of companyRecords) {
+            const companyKey = record.companyKey || normalizeKey(record.companyName);
+            if (!companyKey) continue;
+            let accountMap = companyIndex.get(companyKey);
+            if (!accountMap) {
+                accountMap = new Map();
+                companyIndex.set(companyKey, accountMap);
+            }
+            accountMap.set(record.accountKey, record);
+        }
+
+        for (const record of bossRecords) {
+            const companyKey = record.companyKey || normalizeKey(record.companyName);
+            const bossKey = record.bossKey || normalizeBossName(record.bossName);
+            if (!companyKey || !bossKey) continue;
+            let bossMap = bossIndex.get(companyKey);
+            if (!bossMap) {
+                bossMap = new Map();
+                bossIndex.set(companyKey, bossMap);
+            }
+            let accountMap = bossMap.get(bossKey);
+            if (!accountMap) {
+                accountMap = new Map();
+                bossMap.set(bossKey, accountMap);
+            }
+            accountMap.set(record.accountKey, record);
+        }
+        return { companyIndex, bossIndex };
+    }
+
+    function appendPrivacyBadgeBlocks(blocks, titleLines, companyName, hrInfo, privacyIndexes) {
+        if (!privacyIndexes || !companyName) return;
+        const companyKey = normalizeKey(companyName);
+        if (!companyKey) return;
+        const companyMap = privacyIndexes.companyIndex.get(companyKey);
+        if (companyMap) {
+            for (const record of companyMap.values()) {
+                const accountLabel = formatAccountLabel(record);
+                blocks.push({
+                    lines: [
+                        { text: formatStatusAccount('屏蔽公司', accountLabel), className: 'bp-badge-line bp-status-company-blacklist' },
+                        { text: record.sourceTypes || '屏蔽公司', className: 'bp-badge-sub' }
+                    ]
+                });
+                titleLines.push(`账号:${accountLabel} | 状态:屏蔽公司 | 公司:${record.companyName}\n来源:${record.sourceTypes || '屏蔽公司'}`);
+            }
+        }
+
+        const bossName = extractBossName(hrInfo || '');
+        const bossKey = normalizeBossName(bossName);
+        if (!bossKey) return;
+        const bossMap = privacyIndexes.bossIndex.get(companyKey);
+        const accountMap = bossMap ? bossMap.get(bossKey) : null;
+        if (!accountMap) return;
+        for (const record of accountMap.values()) {
+            const accountLabel = formatAccountLabel(record);
+            blocks.push({
+                lines: [
+                    { text: formatStatusAccount('拉黑Boss', accountLabel), className: 'bp-badge-line bp-status-boss-blacklist' },
+                    { text: record.bossName || bossName, className: 'bp-badge-sub' }
+                ]
+            });
+            titleLines.push(`账号:${accountLabel} | 状态:拉黑Boss | 公司:${record.companyName || companyName}\nBoss:${record.bossName || bossName}${record.title ? '\n职位:' + record.title : ''}`);
+        }
+    }
+
     function getCompanyJobs(companyJobs, companyKey, accountKey) {
         if (!companyJobs || !companyKey) return [];
         const map = companyJobs.get(companyKey);
@@ -1806,6 +2628,7 @@
     async function applyBadgesForJobsPage() {
         const records = await listAllRecords();
         const { companyIndex, companyJobs } = buildCompanyIndexes(records);
+        const privacyIndexes = await buildPrivacyIndexes();
         const index = new Map();
         const byCompany = new Map();
         const upsert = (key, record) => {
@@ -1840,7 +2663,7 @@
                 });
             }
         }
-        if (!index.size && !byCompany.size && !companyIndex.size) return;
+        if (!index.size && !byCompany.size && !companyIndex.size && !privacyIndexes.companyIndex.size && !privacyIndexes.bossIndex.size) return;
         const cards = collectCardCandidates();
         for (const card of cards) {
             if (!card || isInIgnoredArea(card)) continue;
@@ -1892,19 +2715,14 @@
                 ...Array.from(companyMatchesByAccount.values()).map((record) => ({ record, companyOnly: true }))
             ];
             let badge = card.querySelector(`.${BADGE_CLASS}`);
-            if (!matchedItems.length) {
-                if (badge) badge.remove();
-                continue;
-            }
-            ensurePositioned(card);
+            const titleLines = [];
+            const blocks = [];
             matchedItems.sort((a, b) => {
                 const rankDiff = statusRank(b.record?.flags || {}) - statusRank(a.record?.flags || {});
                 if (rankDiff !== 0) return rankDiff;
                 if (a.companyOnly !== b.companyOnly) return a.companyOnly ? 1 : -1;
                 return 0;
             });
-            const titleLines = [];
-            const blocks = [];
             matchedItems.forEach((item) => {
                 const status = formatStatusWithScope(item.record, item.companyOnly);
                 if (!status) return;
@@ -1923,10 +2741,12 @@
                 const title = formatBadgeTitle(item.record, item.companyOnly, jobInfo.full);
                 if (title) titleLines.push(title);
             });
+            appendPrivacyBadgeBlocks(blocks, titleLines, companyName, extractHrFromNode(card), privacyIndexes);
             if (!blocks.length) {
                 if (badge) badge.remove();
                 continue;
             }
+            ensurePositioned(card);
             if (!badge) {
                 badge = document.createElement('div');
                 badge.className = BADGE_CLASS;
@@ -1940,15 +2760,18 @@
         const records = await listAllRecords();
         const { companyIndex, companyJobs } = buildCompanyIndexes(records);
         const companyJobIndex = buildCompanyJobIndex(records);
-        if (!companyIndex.size) return;
+        const privacyIndexes = await buildPrivacyIndexes();
+        if (!companyIndex.size && !privacyIndexes.companyIndex.size && !privacyIndexes.bossIndex.size) return;
         const cards = collectChatCandidates();
         for (const card of cards) {
             if (!card || isInIgnoredArea(card)) continue;
             let { companyName } = extractJobCompanyText(card);
             let jobName = '';
+            let hrInfo = '';
             const nameBox = card.querySelector('.name-box');
             if (nameBox) {
                 const spans = Array.from(nameBox.querySelectorAll('span')).map((el) => normalizeText(el.textContent || '')).filter(Boolean);
+                hrInfo = spans[0] || '';
                 if (spans.length >= 2 && isLikelyCompanyName(spans[1])) {
                     companyName = spans[1];
                 }
@@ -1969,8 +2792,8 @@
             }
             if (!companyName) continue;
             const companyKey = normalizeKey(companyName);
-            if (!companyKey || !companyIndex.has(companyKey)) continue;
-            const accountMap = companyIndex.get(companyKey);
+            if (!companyKey) continue;
+            const accountMap = companyIndex.get(companyKey) || new Map();
             const jobMatchesByAccount = new Map();
             const jobExact = normalizeJobKey(jobName, false);
             const jobLoose = normalizeJobKey(jobName, true);
@@ -1993,13 +2816,12 @@
                     .filter((record) => shouldShowChatStatus(record) && !jobMatchesByAccount.has(record.accountKey))
                     .map((record) => ({ record, companyOnly: true }))
             ];
-            if (!matchedItems.length) continue;
             ensurePositioned(card);
             matchedItems.sort((a, b) => statusRank(b.record?.flags || {}) - statusRank(a.record?.flags || {}));
             const titleLines = [];
             const blocks = [];
             matchedItems.forEach((item) => {
-                const status = formatStatusWithScope(item.record, true);
+                const status = formatStatusWithScope(item.record, item.companyOnly);
                 if (!status) return;
                 const statusClass = getStatusClass(status);
                 const accountLabel = formatAccountLabel(item.record);
@@ -2014,6 +2836,7 @@
                 const title = formatBadgeTitle(item.record, true, jobInfo.full);
                 if (title) titleLines.push(title);
             });
+            appendPrivacyBadgeBlocks(blocks, titleLines, companyName, hrInfo, privacyIndexes);
             if (!blocks.length) continue;
             const existingBadges = card.querySelectorAll(`.${BADGE_CLASS}`);
             if (existingBadges.length > 1) {
@@ -2157,6 +2980,15 @@
             scheduleScan(420);
         });
         observer.observe(document.documentElement, { childList: true, subtree: true });
+        document.addEventListener('click', (event) => {
+            if (isShieldCompanyPage()) rememberShieldDialogSourceFromClick(event.target);
+        }, true);
+        window.addEventListener('scroll', () => {
+            if (isPrivacySetPage()) scheduleScan(500);
+        }, true);
+        document.addEventListener('scroll', () => {
+            if (isPrivacySetPage()) scheduleScan(500);
+        }, true);
     }
 
     function hookHistory() {
@@ -2261,27 +3093,21 @@
         }
     }
 
-    async function clearDatabase() {
-        const confirmed = confirm('确认清空本地数据库？此操作不可恢复。');
+    async function clearCurrentData() {
+        const view = state.dataView || 'progress';
+        const storeName = view === 'companyBlacklist'
+            ? STORE_COMPANY_BLACKLIST
+            : view === 'bossBlacklist'
+                ? STORE_BOSS_BLACKLIST
+                : STORE_RECORDS;
+        const label = getDataViewLabel(view);
+        const records = await listStoreByAccount(storeName, state.accountKey);
+        const confirmed = confirm(`确认清空当前账号「${state.accountLabel || state.accountKey}」的「${label}」数据？\n将删除 ${records.length} 条本地记录，此操作不可恢复。`);
         if (!confirmed) return;
-        if (state.db) {
-            try {
-                state.db.close();
-            } catch (err) {
-                // ignore
-            }
-        }
-        await new Promise((resolve, reject) => {
-            const req = indexedDB.deleteDatabase(DB_NAME);
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
-            req.onblocked = () => resolve();
+        await withStore(storeName, 'readwrite', (store) => {
+            records.forEach((record) => store.delete(record.id));
         });
-        state.db = await openDB();
-        state.accountLabel = '未命名账号';
-        state.enableNetwork = false;
-        state.tabStatusMap = {};
-        await setTabStatusMap({});
+        state.syncStatus = `已清空${label}：${records.length}条`;
         renderPanel();
         applyBadges();
     }
@@ -2294,7 +3120,22 @@
         return text;
     }
 
-    async function exportCsv() {
+    function downloadCsv(lines, prefix) {
+        const csvContent = '\ufeff' + lines.join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const accountPart = sanitizeFilenamePart(state.accountLabel || state.accountKey || 'account');
+        const timePart = formatTimestampForFilename(new Date());
+        a.download = `${prefix}-${accountPart}-${timePart}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    async function exportProgressCsv() {
         const recordsAll = await listRecordsByAccount(state.accountKey);
         const currentLabel = sanitizeString(state.accountLabel || '');
         let records = recordsAll;
@@ -2323,18 +3164,56 @@
             ].map(escapeCsv);
             lines.push(row.join(','));
         }
-        const csvContent = '\ufeff' + lines.join('\n');
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        const accountPart = sanitizeFilenamePart(state.accountLabel || state.accountKey || 'account');
-        const timePart = formatTimestampForFilename(new Date());
-        a.download = `boss-progress-${accountPart}-${timePart}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
+        downloadCsv(lines, 'boss-progress');
+    }
+
+    async function exportCompanyBlacklistCsv() {
+        const records = (await listStoreByAccount(STORE_COMPANY_BLACKLIST, state.accountKey))
+            .filter((record) => isBlacklistCompanyName(record.companyName || ''));
+        const header = ['accountKey', 'accountLabel', 'companyName', 'companyKey', 'sourceTypes', 'updatedAt'];
+        const lines = [header.join(',')];
+        for (const record of records) {
+            lines.push([
+                record.accountKey,
+                record.accountLabel,
+                record.companyName,
+                record.companyKey,
+                record.sourceTypes,
+                record.updatedAt || ''
+            ].map(escapeCsv).join(','));
+        }
+        downloadCsv(lines, 'boss-company-blacklist');
+    }
+
+    async function exportBossBlacklistCsv() {
+        const records = await listStoreByAccount(STORE_BOSS_BLACKLIST, state.accountKey);
+        const header = ['accountKey', 'accountLabel', 'bossName', 'bossKey', 'companyName', 'companyKey', 'title', 'updatedAt'];
+        const lines = [header.join(',')];
+        for (const record of records) {
+            lines.push([
+                record.accountKey,
+                record.accountLabel,
+                record.bossName,
+                record.bossKey,
+                record.companyName,
+                record.companyKey,
+                record.title,
+                record.updatedAt || ''
+            ].map(escapeCsv).join(','));
+        }
+        downloadCsv(lines, 'boss-boss-blacklist');
+    }
+
+    async function exportCsv() {
+        if (state.dataView === 'companyBlacklist') {
+            await exportCompanyBlacklistCsv();
+            return;
+        }
+        if (state.dataView === 'bossBlacklist') {
+            await exportBossBlacklistCsv();
+            return;
+        }
+        await exportProgressCsv();
     }
 
     async function importCsv(file) {
@@ -2343,6 +3222,12 @@
         if (rows.length <= 1) return;
         const header = parseCsvLine(rows[0]).map((h) => h.trim());
         if (header[0]) header[0] = header[0].replace(/^\ufeff/, '');
+        const headerSet = new Set(header);
+        const importType = headerSet.has('bossName')
+            ? 'bossBlacklist'
+            : headerSet.has('sourceTypes') && headerSet.has('companyKey') && !headerSet.has('jobName')
+                ? 'companyBlacklist'
+                : 'progress';
         for (let i = 1; i < rows.length; i += 1) {
             const row = parseCsvLine(rows[i]);
             if (!row.length) continue;
@@ -2353,6 +3238,33 @@
             const incomingAccountKey = data.accountKey || '';
             const shouldRemapAccount = incomingAccountKey && incomingAccountKey !== state.accountKey;
             const accountKey = shouldRemapAccount ? state.accountKey : (incomingAccountKey || state.accountKey);
+            if (importType === 'companyBlacklist') {
+                await mergeAndSaveCompanyBlacklist({
+                    accountKey,
+                    accountLabel: data.accountLabel || state.accountLabel,
+                    companyName: data.companyName || '',
+                    companyKey: data.companyKey || normalizeKey(data.companyName || ''),
+                    sourceTypes: data.sourceTypes || '',
+                    sourceType: data.sourceTypes || '',
+                    updatedAt: Number(data.updatedAt) || Date.now(),
+                    sourceAccountKey: shouldRemapAccount ? incomingAccountKey : ''
+                });
+                continue;
+            }
+            if (importType === 'bossBlacklist') {
+                await mergeAndSaveBossBlacklist({
+                    accountKey,
+                    accountLabel: data.accountLabel || state.accountLabel,
+                    bossName: data.bossName || '',
+                    bossKey: data.bossKey || normalizeBossName(data.bossName || ''),
+                    companyName: data.companyName || '',
+                    companyKey: data.companyKey || normalizeKey(data.companyName || ''),
+                    title: data.title || '',
+                    updatedAt: Number(data.updatedAt) || Date.now(),
+                    sourceAccountKey: shouldRemapAccount ? incomingAccountKey : ''
+                });
+                continue;
+            }
             const record = {
                 accountKey,
                 accountLabel: data.accountLabel || state.accountLabel,
@@ -2407,6 +3319,7 @@
     async function init() {
         state.db = await openDB();
         await ensureAccount();
+        state.dataView = detectDataViewFromPage();
         state.enableNetwork = parseBoolean(await getMeta('enableNetwork'));
         state.tabStatusMap = await getTabStatusMap();
         if (document.readyState === 'loading') {
