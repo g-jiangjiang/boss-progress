@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.5.5
+// @version      0.5.9
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
 // @match        https://www.zhipin.com/web/geek/job*
 // @match        https://www.zhipin.com/web/geek/*
+// @downloadURL  https://raw.githubusercontent.com/g-jiangjiang/boss-progress/main/boss-progress.user.js
+// @updateURL    https://raw.githubusercontent.com/g-jiangjiang/boss-progress/main/boss-progress.user.js
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -209,6 +211,14 @@
         if (isShieldCompanyPage()) return 'companyBlacklist';
         if (isBossBlacklistPage()) return 'bossBlacklist';
         return state.dataView || 'progress';
+    }
+
+    function syncDataViewFromPage() {
+        const nextView = detectDataViewFromPage();
+        if (state.dataView !== nextView) {
+            state.dataView = nextView;
+            renderPanel();
+        }
     }
 
     function getRecommendTab() {
@@ -1107,7 +1117,10 @@
         <button class="bp-toggle" title="收起/展开">≡</button>
       </div>
       <div class="bp-body">
-        <div class="bp-account">账号：<span class="bp-account-label"></span> <button class="bp-set-account">设置</button></div>
+        <div class="bp-account">
+          <span>账号：<strong class="bp-account-label"></strong></span>
+          <button class="bp-set-account">设置</button>
+        </div>
         <div class="bp-view-switch">
           <button class="bp-view-btn" data-view="progress">投递</button>
           <button class="bp-view-btn" data-view="companyBlacklist">屏蔽公司</button>
@@ -1117,13 +1130,9 @@
           <button class="bp-sync">同步页面</button>
           <button class="bp-export">导出CSV</button>
           <button class="bp-import">导入CSV</button>
-        </div>
-        <div class="bp-actions bp-actions-secondary">
           <button class="bp-clear">清空数据</button>
-          <button class="bp-network"></button>
         </div>
         <div class="bp-sync-status"></div>
-        <div class="bp-tip">接口采集可能触发风控，建议必要时手动开启。</div>
         <div class="bp-tab bp-progress-only">
           <div class="bp-tab-label">当前页签状态</div>
           <div class="bp-tab-buttons">
@@ -1159,41 +1168,40 @@
 
         const style = document.createElement('style');
         style.textContent = `
-      #${PANEL_ID} { position: fixed; right: 16px; bottom: 16px; width: 360px; min-width: 300px; min-height: 260px; max-width: 80vw; max-height: 80vh; resize: none !important; overflow: auto; font-size: 12px; color: #1f2d3d; z-index: 999999; }
-      #${PANEL_ID} .bp-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; background: #0f172a; color: #fff; border-radius: 8px 8px 0 0; }
-      #${PANEL_ID} .bp-title { font-weight: 600; }
+      #${PANEL_ID} { position: fixed; right: 16px; bottom: 16px; width: 390px; min-width: 320px; min-height: 260px; max-width: 80vw; max-height: 80vh; resize: none !important; overflow: auto; font-size: 12px; color: #1f2d3d; z-index: 999999; border-radius: 12px; box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18); }
+      #${PANEL_ID} * { box-sizing: border-box; }
+      #${PANEL_ID} .bp-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; background: #0f172a; color: #fff; border-radius: 12px 12px 0 0; }
+      #${PANEL_ID} .bp-title { font-weight: 700; letter-spacing: .2px; }
       #${PANEL_ID} .bp-toggle { background: transparent; border: none; color: #fff; cursor: pointer; font-size: 16px; }
-      #${PANEL_ID} .bp-body { background: #ffffff; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; padding: 10px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.15); }
-      #${PANEL_ID} .bp-account { margin-bottom: 8px; }
+      #${PANEL_ID} .bp-body { background: #ffffff; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px; padding: 12px; }
+      #${PANEL_ID} .bp-account { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #eef2f7; }
       #${PANEL_ID} .bp-account button { margin-left: 6px; }
-      #${PANEL_ID} .bp-view-switch { display: flex; gap: 6px; margin-bottom: 8px; }
-      #${PANEL_ID} .bp-view-switch button { flex: 1; }
-      #${PANEL_ID} .bp-view-switch button.active { background: #0f766e; border-color: #0f766e; color: #fff; }
-      #${PANEL_ID} .bp-actions { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
-      #${PANEL_ID} .bp-actions button { flex: 1; }
-      #${PANEL_ID} .bp-actions-secondary { margin-top: -2px; }
-      #${PANEL_ID} .bp-actions-secondary button { flex: 1; }
-      #${PANEL_ID} .bp-sync-status { color: #0f766e; margin-bottom: 6px; min-height: 16px; }
-      #${PANEL_ID} .bp-tip { color: #94a3b8; margin-bottom: 8px; }
-      #${PANEL_ID} .bp-tab { margin-bottom: 8px; }
+      #${PANEL_ID} .bp-view-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 4px 0 12px; padding: 6px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 12px; }
+      #${PANEL_ID} .bp-view-switch button { min-width: 0; border-color: transparent; background: transparent; }
+      #${PANEL_ID} .bp-view-switch button.active { background: #0f766e; border-color: #0f766e; color: #fff; box-shadow: 0 6px 14px rgba(15, 118, 110, 0.18); }
+      #${PANEL_ID} .bp-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 10px; padding: 8px; background: #fbfdff; border: 1px solid #e6edf7; border-radius: 12px; }
+      #${PANEL_ID} .bp-actions button { width: 100%; min-width: 0; }
+      #${PANEL_ID} .bp-sync-status { color: #0f766e; margin: 2px 0 8px; min-height: 18px; line-height: 1.45; padding: 0 2px; }
+      #${PANEL_ID} .bp-tab { margin-bottom: 10px; padding: 8px; background: #f8fafc; border: 1px solid #eef2f7; border-radius: 10px; }
       #${PANEL_ID} .bp-tab-label { color: #64748b; margin-bottom: 4px; }
-      #${PANEL_ID} .bp-tab-buttons { display: flex; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
-      #${PANEL_ID} .bp-tab-buttons button { flex: 1; min-width: 64px; }
+      #${PANEL_ID} .bp-tab-buttons { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-bottom: 4px; }
+      #${PANEL_ID} .bp-tab-buttons button { min-width: 0; }
       #${PANEL_ID} .bp-tab-hint { color: #94a3b8; }
-      #${PANEL_ID} button { border: 1px solid #cbd5f5; background: #f8fafc; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
+      #${PANEL_ID} button { border: 1px solid #cbd5f5; background: #f8fafc; padding: 7px 8px; border-radius: 7px; cursor: pointer; line-height: 1.2; }
       #${PANEL_ID} button:hover { background: #eef2ff; }
-      #${PANEL_ID} .bp-search { width: 100%; padding: 6px; border: 1px solid #cbd5f5; border-radius: 4px; margin-bottom: 8px; }
+      #${PANEL_ID} .bp-search { width: 100%; padding: 8px; border: 1px solid #cbd5f5; border-radius: 8px; margin-bottom: 8px; outline: none; }
+      #${PANEL_ID} .bp-search:focus { border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.08); }
       #${PANEL_ID} .bp-filter { display: flex; align-items: center; gap: 6px; margin: 0 0 8px 0; color: #64748b; }
       #${PANEL_ID} .bp-filter label { white-space: nowrap; }
-      #${PANEL_ID} .bp-status-filter { flex: 1; padding: 4px 6px; border: 1px solid #cbd5f5; border-radius: 4px; background: #fff; }
-      #${PANEL_ID} .bp-stats { margin-bottom: 8px; color: #475569; }
+      #${PANEL_ID} .bp-status-filter, #${PANEL_ID} .bp-account-filter { flex: 1; padding: 5px 6px; border: 1px solid #cbd5f5; border-radius: 7px; background: #fff; min-width: 0; }
+      #${PANEL_ID} .bp-stats { margin-bottom: 8px; color: #475569; padding: 6px 8px; background: #f8fafc; border-radius: 8px; }
       #${PANEL_ID} .bp-list { max-height: 45vh; overflow: auto; border-top: 1px dashed #e2e8f0; padding-top: 8px; }
-      #${PANEL_ID} .bp-item { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; display: flex; gap: 8px; align-items: flex-start; }
+      #${PANEL_ID} .bp-item { margin-bottom: 0; padding: 8px 0; border-bottom: 1px solid #f1f5f9; display: flex; gap: 8px; align-items: flex-start; }
       #${PANEL_ID} .bp-item:last-child { border-bottom: none; }
       #${PANEL_ID} .bp-item-main { flex: 1; min-width: 0; }
       #${PANEL_ID} .bp-item-title { font-weight: 600; }
       #${PANEL_ID} .bp-item-sub { color: #64748b; }
-      #${PANEL_ID} .bp-item-delete { border: 1px solid #fecaca; background: #fff1f2; color: #b91c1c; padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+      #${PANEL_ID} .bp-item-delete { border: 1px solid #fecaca; background: #fff1f2; color: #b91c1c; padding: 4px 7px; border-radius: 7px; cursor: pointer; font-size: 12px; }
       #${PANEL_ID} .bp-item-delete:hover { background: #ffe4e6; }
       #${PANEL_ID}.collapsed .bp-body { display: none; }
       .${BADGE_CLASS} { position: absolute; top: 8px; right: 8px; background: transparent; padding: 0; font-size: 12px; border-radius: 10px; z-index: 20; max-width: 160px; display: flex; flex-direction: column; align-items: flex-end; }
@@ -1273,16 +1281,6 @@
             panel.querySelector('.bp-file').click();
         });
         panel.querySelector('.bp-clear').addEventListener('click', clearCurrentData);
-        panel.querySelector('.bp-network').addEventListener('click', async () => {
-            const next = !state.enableNetwork;
-            const message = next
-                ? '开启接口采集会尝试拦截接口响应，可能触发风控并导致页面异常。确认开启并刷新页面？'
-                : '关闭接口采集将停止拦截接口响应。确认关闭并刷新页面？';
-            if (!confirm(message)) return;
-            state.enableNetwork = next;
-            await setMeta('enableNetwork', state.enableNetwork ? 1 : 0);
-            location.reload();
-        });
         panel.querySelectorAll('.bp-tab-btn').forEach((btn) => {
             btn.addEventListener('click', async () => {
                 const status = btn.dataset.status || 'auto';
@@ -1403,10 +1401,6 @@
         panel.querySelectorAll('.bp-progress-only').forEach((el) => {
             el.style.display = state.dataView === 'progress' ? '' : 'none';
         });
-        const networkBtn = panel.querySelector('.bp-network');
-        if (networkBtn) {
-            networkBtn.textContent = state.enableNetwork ? '接口采集：开' : '接口采集：关';
-        }
 
         const tabHintEl = panel.querySelector('.bp-tab-hint');
         if (tabHintEl) {
@@ -2135,7 +2129,7 @@
         applyBadges();
     }
 
-    async function saveVisibleShieldCompanies() {
+    async function saveVisibleShieldCompanies(silent = false) {
         await ensureAccount();
         const dialog = findShieldDialogRoot();
         if (dialog) {
@@ -2160,7 +2154,7 @@
                 if (!existing || !hadSource) added += 1;
             }
             const total = (await listStoreByAccount(STORE_COMPANY_BLACKLIST, state.accountKey)).length;
-            if (names.length) state.syncStatus = `已同步${sourceType}弹窗：新增${added}，总${total}`;
+            if (names.length && !silent) state.syncStatus = `已同步${sourceType}弹窗：新增${added}，总${total}`;
             return;
         }
         const visibleBySource = collectVisibleShieldCompaniesBySource();
@@ -2187,10 +2181,10 @@
             }
         }
         const total = (await listStoreByAccount(STORE_COMPANY_BLACKLIST, state.accountKey)).length;
-        if (seen) state.syncStatus = `已同步当前可见屏蔽公司：新增${added}，总${total}`;
+        if (seen && !silent) state.syncStatus = `已同步当前可见屏蔽公司：新增${added}，总${total}`;
     }
 
-    async function saveVisibleBossBlacklist() {
+    async function saveVisibleBossBlacklist(silent = false) {
         await ensureAccount();
         const records = collectBossBlacklistFromRoot(document);
         let added = 0;
@@ -2206,7 +2200,7 @@
             if (!existing) added += 1;
         }
         const total = (await listStoreByAccount(STORE_BOSS_BLACKLIST, state.accountKey)).length;
-        if (records.length) state.syncStatus = `已同步当前可见拉黑Boss：新增${added}，总${total}`;
+        if (records.length && !silent) state.syncStatus = `已同步当前可见拉黑Boss：新增${added}，总${total}`;
     }
 
     function looksLikeCard(node) {
@@ -2381,15 +2375,15 @@
         if (now - state.lastScanAt < 800) return;
         state.lastScanAt = now;
         if (isShieldCompanyPage()) {
-            state.dataView = state.dataView || 'companyBlacklist';
-            await saveVisibleShieldCompanies();
+            state.dataView = 'companyBlacklist';
+            await saveVisibleShieldCompanies(true);
             renderPanel();
             applyBadges();
             return;
         }
         if (isBossBlacklistPage()) {
-            state.dataView = state.dataView || 'bossBlacklist';
-            await saveVisibleBossBlacklist();
+            state.dataView = 'bossBlacklist';
+            await saveVisibleBossBlacklist(true);
             renderPanel();
             applyBadges();
             return;
@@ -2997,6 +2991,7 @@
             if (!method) return null;
             return function (...args) {
                 const result = method.apply(this, args);
+                syncDataViewFromPage();
                 scheduleScan(200);
                 setTimeout(() => scheduleScan(900), 900);
                 return result;
@@ -3007,6 +3002,7 @@
         const wrappedReplace = wrap(history.replaceState);
         if (wrappedReplace) history.replaceState = wrappedReplace;
         window.addEventListener('popstate', () => {
+            syncDataViewFromPage();
             scheduleScan(200);
             setTimeout(() => scheduleScan(900), 900);
         });
@@ -3320,7 +3316,10 @@
         state.db = await openDB();
         await ensureAccount();
         state.dataView = detectDataViewFromPage();
-        state.enableNetwork = parseBoolean(await getMeta('enableNetwork'));
+        if (parseBoolean(await getMeta('enableNetwork'))) {
+            await setMeta('enableNetwork', 0);
+        }
+        state.enableNetwork = false;
         state.tabStatusMap = await getTabStatusMap();
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
