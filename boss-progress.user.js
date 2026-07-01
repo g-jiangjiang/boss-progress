@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.5.9
+// @version      0.6.5
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -36,6 +36,7 @@
         lastScanAt: 0,
         searchQuery: '',
         statusFilter: 'all',
+        cityFilter: 'all',
         accountFilter: 'all',
         dataView: 'progress',
         syncStatus: '',
@@ -1143,22 +1144,30 @@
           </div>
           <div class="bp-tab-hint"></div>
         </div>
-        <input class="bp-search" placeholder="搜索 公司 / 岗位 / 状态" />
+        <div class="bp-search-wrap">
+          <input class="bp-search" placeholder="搜索 公司 / 岗位 / 状态" />
+          <button class="bp-search-clear" type="button" title="清空搜索" aria-label="清空搜索" hidden>×</button>
+        </div>
         <div class="bp-filter bp-progress-only">
           <label>状态筛选</label>
-          <select class="bp-status-filter">
-            <option value="all">全部</option>
-            <option value="已沟通">已沟通</option>
-            <option value="已投递">已投递</option>
-            <option value="已面试">已面试</option>
-            <option value="已收藏">已收藏</option>
-          </select>
+          <div class="bp-select-combo" data-filter="status">
+            <button class="bp-select-toggle bp-status-filter" type="button" aria-haspopup="listbox" aria-expanded="false">全部</button>
+            <div class="bp-select-menu bp-status-menu" role="listbox" hidden></div>
+          </div>
+        </div>
+        <div class="bp-filter bp-progress-only">
+          <label>城市筛选</label>
+          <div class="bp-select-combo" data-filter="city">
+            <button class="bp-select-toggle bp-city-filter" type="button" aria-haspopup="listbox" aria-expanded="false">全部</button>
+            <div class="bp-select-menu bp-city-menu" role="listbox" hidden></div>
+          </div>
         </div>
         <div class="bp-filter">
           <label>账号筛选</label>
-          <select class="bp-account-filter">
-            <option value="all">全部</option>
-          </select>
+          <div class="bp-select-combo" data-filter="account">
+            <button class="bp-select-toggle bp-account-filter" type="button" aria-haspopup="listbox" aria-expanded="false">全部</button>
+            <div class="bp-select-menu bp-account-menu" role="listbox" hidden></div>
+          </div>
         </div>
         <div class="bp-stats"></div>
         <div class="bp-list"></div>
@@ -1189,11 +1198,23 @@
       #${PANEL_ID} .bp-tab-hint { color: #94a3b8; }
       #${PANEL_ID} button { border: 1px solid #cbd5f5; background: #f8fafc; padding: 7px 8px; border-radius: 7px; cursor: pointer; line-height: 1.2; }
       #${PANEL_ID} button:hover { background: #eef2ff; }
-      #${PANEL_ID} .bp-search { width: 100%; padding: 8px; border: 1px solid #cbd5f5; border-radius: 8px; margin-bottom: 8px; outline: none; }
+      #${PANEL_ID} .bp-search-wrap { position: relative; margin-bottom: 8px; }
+      #${PANEL_ID} .bp-search { width: 100%; padding: 8px 34px 8px 8px; border: 1px solid #cbd5f5; border-radius: 8px; outline: none; }
       #${PANEL_ID} .bp-search:focus { border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.08); }
+      #${PANEL_ID} .bp-search-clear { position: absolute; top: 50%; right: 7px; transform: translateY(-50%); width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: none; border-radius: 50%; background: transparent; color: #94a3b8; font-size: 16px; line-height: 1; }
+      #${PANEL_ID} .bp-search-clear:hover { background: #f1f5f9; color: #475569; }
+      #${PANEL_ID} .bp-search-clear[hidden] { display: none; }
       #${PANEL_ID} .bp-filter { display: flex; align-items: center; gap: 6px; margin: 0 0 8px 0; color: #64748b; }
       #${PANEL_ID} .bp-filter label { white-space: nowrap; }
-      #${PANEL_ID} .bp-status-filter, #${PANEL_ID} .bp-account-filter { flex: 1; padding: 5px 6px; border: 1px solid #cbd5f5; border-radius: 7px; background: #fff; min-width: 0; }
+      #${PANEL_ID} .bp-select-combo { position: relative; flex: 1; min-width: 0; }
+      #${PANEL_ID} .bp-select-toggle { width: 100%; min-width: 0; padding: 5px 26px 5px 8px; border: 1px solid #cbd5f5; border-radius: 7px; background: #fff; color: #1f2d3d; text-align: left; position: relative; font-size: 12px; line-height: 1.4; }
+      #${PANEL_ID} .bp-select-toggle::after { content: "⌄"; position: absolute; right: 8px; top: 50%; transform: translateY(-55%); color: #64748b; font-size: 12px; }
+      #${PANEL_ID} .bp-select-toggle:hover { background: #fff; border-color: #9fb2f3; }
+      #${PANEL_ID} .bp-select-menu { position: absolute; z-index: 1000000; top: calc(100% + 4px); left: 0; right: 0; max-height: 190px; overflow: auto; padding: 4px; border: 1px solid #cbd5f5; border-radius: 8px; background: #fff; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16); }
+      #${PANEL_ID} .bp-select-menu[hidden] { display: none; }
+      #${PANEL_ID} .bp-select-option { display: block; width: 100%; padding: 6px 8px; border: none; border-radius: 6px; background: transparent; color: #1f2d3d; text-align: left; font-size: 12px; }
+      #${PANEL_ID} .bp-select-option:hover { background: #f1f5f9; }
+      #${PANEL_ID} .bp-select-option.active { background: #0f766e; color: #fff; }
       #${PANEL_ID} .bp-stats { margin-bottom: 8px; color: #475569; padding: 6px 8px; background: #f8fafc; border-radius: 8px; }
       #${PANEL_ID} .bp-list { max-height: 45vh; overflow: auto; border-top: 1px dashed #e2e8f0; padding-top: 8px; }
       #${PANEL_ID} .bp-item { margin-bottom: 0; padding: 8px 0; border-bottom: 1px solid #f1f5f9; display: flex; gap: 8px; align-items: flex-start; }
@@ -1203,8 +1224,11 @@
       #${PANEL_ID} .bp-item-sub { color: #64748b; }
       #${PANEL_ID} .bp-item-delete { border: 1px solid #fecaca; background: #fff1f2; color: #b91c1c; padding: 4px 7px; border-radius: 7px; cursor: pointer; font-size: 12px; }
       #${PANEL_ID} .bp-item-delete:hover { background: #ffe4e6; }
+      #${PANEL_ID}.collapsed { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: visible; }
       #${PANEL_ID}.collapsed .bp-body { display: none; }
+      #${PANEL_ID}.collapsed .bp-header { border-radius: 12px; }
       .${BADGE_CLASS} { position: absolute; top: 8px; right: 8px; background: transparent; padding: 0; font-size: 12px; border-radius: 10px; z-index: 20; max-width: 160px; display: flex; flex-direction: column; align-items: flex-end; }
+      .${BADGE_CLASS}.boss-progress-jobs-badge { top: 38px; right: 10px; max-width: 152px; pointer-events: none; }
       .${BADGE_CLASS} .bp-badge-line { display: inline-block; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; padding: 2px 6px; border-radius: 10px; line-height: 1.2; background: #f1f5f9; color: #334155; }
       .${BADGE_CLASS} .bp-badge-sub { display: inline-block; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 2px 6px; border-radius: 10px; line-height: 1.2; background: #f8fafc; color: #64748b; }
       .${BADGE_CLASS} .bp-badge-gap { height: 2px; }
@@ -1302,15 +1326,49 @@
         });
         panel.querySelector('.bp-search').addEventListener('input', (event) => {
             state.searchQuery = event.target.value.trim().toLowerCase();
+            const clearBtn = panel.querySelector('.bp-search-clear');
+            if (clearBtn) clearBtn.hidden = !event.target.value;
             renderPanel();
         });
-        panel.querySelector('.bp-status-filter').addEventListener('change', (event) => {
-            state.statusFilter = event.target.value || 'all';
+        panel.querySelector('.bp-search-clear').addEventListener('click', () => {
+            const searchInput = panel.querySelector('.bp-search');
+            state.searchQuery = '';
+            if (searchInput) {
+                searchInput.value = '';
+                searchInput.focus();
+            }
+            const clearBtn = panel.querySelector('.bp-search-clear');
+            if (clearBtn) clearBtn.hidden = true;
             renderPanel();
         });
-        panel.querySelector('.bp-account-filter').addEventListener('change', (event) => {
-            state.accountFilter = event.target.value || 'all';
-            renderPanel();
+        panel.addEventListener('click', (event) => {
+            const toggle = event.target.closest('.bp-select-toggle');
+            const option = event.target.closest('.bp-select-option');
+            const combo = event.target.closest('.bp-select-combo');
+            if (toggle && combo && panel.contains(combo)) {
+                const menu = combo.querySelector('.bp-select-menu');
+                if (!menu) return;
+                const shouldOpen = menu.hidden;
+                closeFilterMenus(panel, menu);
+                menu.hidden = !shouldOpen;
+                toggle.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+                return;
+            }
+            if (option && combo && panel.contains(combo)) {
+                const value = option.dataset.value || 'all';
+                const filter = combo.dataset.filter || '';
+                if (filter === 'status') state.statusFilter = value;
+                if (filter === 'city') state.cityFilter = value;
+                if (filter === 'account') state.accountFilter = value;
+                closeFilterMenus(panel);
+                renderPanel();
+                return;
+            }
+            if (!combo) closeFilterMenus(panel);
+        });
+        document.addEventListener('click', (event) => {
+            if (panel.contains(event.target)) return;
+            closeFilterMenus(panel);
         });
         panel.querySelector('.bp-file').addEventListener('change', (event) => {
             const file = event.target.files[0];
@@ -1321,22 +1379,101 @@
         });
     }
 
+    function closeFilterMenus(panel, exceptMenu) {
+        if (!panel) return;
+        panel.querySelectorAll('.bp-select-combo').forEach((combo) => {
+            const menu = combo.querySelector('.bp-select-menu');
+            const toggle = combo.querySelector('.bp-select-toggle');
+            if (!menu || menu === exceptMenu) return;
+            menu.hidden = true;
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+
+    function renderFilterOptions(panel, filter, values, selectedValue, getLabel) {
+        const combo = panel.querySelector(`.bp-select-combo[data-filter="${filter}"]`);
+        if (!combo) return;
+        const toggle = combo.querySelector('.bp-select-toggle');
+        const menu = combo.querySelector('.bp-select-menu');
+        if (!toggle || !menu) return;
+        const selected = selectedValue || 'all';
+        const wasOpen = !menu.hidden;
+        menu.innerHTML = '';
+        values.forEach((value) => {
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.className = 'bp-select-option';
+            option.dataset.value = value;
+            option.setAttribute('role', 'option');
+            option.setAttribute('aria-selected', value === selected ? 'true' : 'false');
+            option.classList.toggle('active', value === selected);
+            option.textContent = getLabel(value);
+            menu.appendChild(option);
+        });
+        toggle.textContent = getLabel(selected);
+        toggle.setAttribute('aria-expanded', wasOpen ? 'true' : 'false');
+        menu.hidden = !wasOpen;
+    }
+
+    function renderStatusOptions(panel) {
+        const values = ['all', '已沟通', '已投递', '已面试', '已收藏'];
+        renderFilterOptions(panel, 'status', values, state.statusFilter, (value) => value === 'all' ? '全部' : value);
+    }
+
     function renderAccountOptions(panel, records) {
-        const accountSelect = panel.querySelector('.bp-account-filter');
-        if (!accountSelect) return;
         const labels = Array.from(new Set(records.map((record) => formatAccountLabel(record)).filter(Boolean)));
         labels.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
         if (state.accountFilter !== 'all' && !labels.includes(state.accountFilter)) {
             state.accountFilter = 'all';
         }
-        accountSelect.innerHTML = '';
-        ['all', ...labels].forEach((value) => {
-            const option = document.createElement('option');
-            option.value = value;
-            option.textContent = value === 'all' ? '全部' : value;
-            accountSelect.appendChild(option);
+        renderFilterOptions(panel, 'account', ['all', ...labels], state.accountFilter, (value) => value === 'all' ? '全部' : value);
+    }
+
+    const CITY_NAME_LIST = [
+        '北京', '上海', '深圳', '广州', '杭州', '南京', '苏州', '成都', '重庆', '武汉',
+        '西安', '天津', '长沙', '郑州', '青岛', '厦门', '宁波', '合肥', '福州', '济南',
+        '大连', '沈阳', '长春', '哈尔滨', '无锡', '常州', '南通', '佛山', '东莞', '珠海',
+        '中山', '惠州', '嘉兴', '绍兴', '金华', '温州', '台州', '湖州', '扬州', '镇江',
+        '泰州', '徐州', '泉州', '南昌', '石家庄', '太原', '昆明', '贵阳', '南宁', '海口',
+        '兰州', '银川', '西宁', '乌鲁木齐', '呼和浩特', '拉萨', '香港', '澳门'
+    ];
+
+    function inferCityFromText(text) {
+        const value = sanitizeString(text).replace(/\s+/g, '');
+        if (!value) return '';
+        const bracketMatch = value.match(/[【\[(（]([^】\])）]{2,16})[】\])）]/);
+        if (bracketMatch) {
+            const hit = CITY_NAME_LIST.find((city) => bracketMatch[1].includes(city));
+            if (hit) return hit;
+        }
+        return CITY_NAME_LIST.find((city) => value.includes(city)) || '';
+    }
+
+    function getRecordCity(record) {
+        if (!record) return '';
+        return inferCityFromText(record.companyName || '') || inferCityFromText(record.jobName || '');
+    }
+
+    function renderCityOptions(panel, records) {
+        const cityCounts = new Map();
+        records.forEach((record) => {
+            const city = getRecordCity(record);
+            if (!city) return;
+            cityCounts.set(city, (cityCounts.get(city) || 0) + 1);
         });
-        accountSelect.value = state.accountFilter || 'all';
+        const cities = Array.from(cityCounts.keys()).sort((a, b) => {
+            const countDiff = (cityCounts.get(b) || 0) - (cityCounts.get(a) || 0);
+            if (countDiff !== 0) return countDiff;
+            return a.localeCompare(b, 'zh-Hans-CN');
+        });
+        if (state.cityFilter !== 'all' && !cities.includes(state.cityFilter)) {
+            state.cityFilter = 'all';
+        }
+        renderFilterOptions(panel, 'city', ['all', ...cities], state.cityFilter, (value) => {
+            return value === 'all' ? '全部' : `${value} (${cityCounts.get(value) || 0})`;
+        });
+        const cityToggle = panel.querySelector('.bp-select-combo[data-filter="city"] .bp-select-toggle');
+        if (cityToggle) cityToggle.textContent = state.cityFilter === 'all' ? '全部' : state.cityFilter;
     }
 
     function renderListItems(panel, records, renderRecord, deleteRecord, sortFn) {
@@ -1395,6 +1532,8 @@
                     ? '搜索 公司 / 来源'
                     : '搜索 公司 / 岗位 / 状态';
         }
+        const clearSearchBtn = panel.querySelector('.bp-search-clear');
+        if (clearSearchBtn && searchInput) clearSearchBtn.hidden = !searchInput.value && !state.searchQuery;
         panel.querySelectorAll('.bp-view-btn').forEach((btn) => {
             btn.classList.toggle('active', btn.dataset.view === state.dataView);
         });
@@ -1438,17 +1577,17 @@
         if (state.dataView === 'progress' && state.statusFilter && state.statusFilter !== 'all') {
             filtered = filtered.filter((record) => record.statusText === state.statusFilter);
         }
+        if (state.dataView === 'progress' && state.cityFilter && state.cityFilter !== 'all') {
+            filtered = filtered.filter((record) => getRecordCity(record) === state.cityFilter);
+        }
         if (state.accountFilter && state.accountFilter !== 'all') {
             filtered = filtered.filter((record) => formatAccountLabel(record) === state.accountFilter);
         }
+        renderStatusOptions(panel);
         renderAccountOptions(panel, records);
+        renderCityOptions(panel, records);
 
         const stats = panel.querySelector('.bp-stats');
-        const statusSelect = panel.querySelector('.bp-status-filter');
-        if (statusSelect && statusSelect.value !== state.statusFilter) {
-            statusSelect.value = state.statusFilter || 'all';
-        }
-
         if (state.dataView === 'companyBlacklist') {
             const manual = records.filter((r) => /手动屏蔽/.test(r.sourceTypes || '')).length;
             const auto = records.filter((r) => /简历自动屏蔽/.test(r.sourceTypes || '')).length;
@@ -2746,6 +2885,7 @@
                 badge.className = BADGE_CLASS;
                 card.appendChild(badge);
             }
+            badge.classList.add('boss-progress-jobs-badge');
             renderBadgeBlocks(badge, blocks, titleLines);
         }
     }
@@ -2844,6 +2984,7 @@
                 badge.className = BADGE_CLASS;
                 card.appendChild(badge);
             }
+            badge.classList.remove('boss-progress-jobs-badge');
             renderBadgeBlocks(badge, blocks, titleLines);
         }
     }
@@ -2892,6 +3033,7 @@
                     badge.className = BADGE_CLASS;
                     card.appendChild(badge);
                 }
+                badge.classList.add('boss-progress-jobs-badge');
                 const accountLabel = formatAccountLabel(best);
                 const badgeText = formatStatusAccount(status, accountLabel);
                 const blocks = [{ lines: [{ text: badgeText, className: `bp-badge-line ${statusClass}` }] }];
