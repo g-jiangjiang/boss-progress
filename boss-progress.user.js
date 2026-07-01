@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS投递进度助手
 // @namespace    https://www.zhipin.com/
-// @version      0.6.5
+// @version      0.6.6
 // @description  记录并展示BOSS投递进度，支持本地数据库、搜索、CSV导入导出
 // @match        https://www.zhipin.com/web/geek/recommend*
 // @match        https://www.zhipin.com/web/geek/jobs*
@@ -1177,7 +1177,7 @@
 
         const style = document.createElement('style');
         style.textContent = `
-      #${PANEL_ID} { position: fixed; right: 16px; bottom: 16px; width: 390px; min-width: 320px; min-height: 260px; max-width: 80vw; max-height: 80vh; resize: none !important; overflow: auto; font-size: 12px; color: #1f2d3d; z-index: 999999; border-radius: 12px; box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18); }
+      #${PANEL_ID} { position: fixed; right: 16px; bottom: 16px; width: 390px; min-width: 320px; min-height: 260px; max-width: 80vw; max-height: 80vh; resize: none !important; overflow: auto; font-size: 12px; color: #1f2d3d; z-index: 999999; border-radius: 12px; background: #fff; box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18); }
       #${PANEL_ID} * { box-sizing: border-box; }
       #${PANEL_ID} .bp-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; background: #0f172a; color: #fff; border-radius: 12px 12px 0 0; }
       #${PANEL_ID} .bp-title { font-weight: 700; letter-spacing: .2px; }
@@ -2681,22 +2681,47 @@
         return { companyIndex, bossIndex };
     }
 
+    function isCompanyKeyMatch(a, b) {
+        if (!a || !b) return false;
+        if (a === b) return true;
+        const shorter = a.length <= b.length ? a : b;
+        const longer = a.length > b.length ? a : b;
+        if (shorter.length < 4) return false;
+        return longer.includes(shorter);
+    }
+
+    function findCompanyPrivacyRecords(privacyIndexes, companyKey) {
+        if (!privacyIndexes || !companyKey) return [];
+        const exact = privacyIndexes.companyIndex.get(companyKey);
+        if (exact) return Array.from(exact.values());
+        const records = [];
+        const seen = new Set();
+        privacyIndexes.companyIndex.forEach((accountMap, key) => {
+            if (!isCompanyKeyMatch(companyKey, key)) return;
+            accountMap.forEach((record) => {
+                const id = record.id || `${record.accountKey}:${record.companyKey || record.companyName}`;
+                if (seen.has(id)) return;
+                seen.add(id);
+                records.push(record);
+            });
+        });
+        return records;
+    }
+
     function appendPrivacyBadgeBlocks(blocks, titleLines, companyName, hrInfo, privacyIndexes) {
         if (!privacyIndexes || !companyName) return;
         const companyKey = normalizeKey(companyName);
         if (!companyKey) return;
-        const companyMap = privacyIndexes.companyIndex.get(companyKey);
-        if (companyMap) {
-            for (const record of companyMap.values()) {
-                const accountLabel = formatAccountLabel(record);
-                blocks.push({
-                    lines: [
-                        { text: formatStatusAccount('屏蔽公司', accountLabel), className: 'bp-badge-line bp-status-company-blacklist' },
-                        { text: record.sourceTypes || '屏蔽公司', className: 'bp-badge-sub' }
-                    ]
-                });
-                titleLines.push(`账号:${accountLabel} | 状态:屏蔽公司 | 公司:${record.companyName}\n来源:${record.sourceTypes || '屏蔽公司'}`);
-            }
+        const companyRecords = findCompanyPrivacyRecords(privacyIndexes, companyKey);
+        for (const record of companyRecords) {
+            const accountLabel = formatAccountLabel(record);
+            blocks.push({
+                lines: [
+                    { text: formatStatusAccount('屏蔽公司', accountLabel), className: 'bp-badge-line bp-status-company-blacklist' },
+                    { text: record.sourceTypes || '屏蔽公司', className: 'bp-badge-sub' }
+                ]
+            });
+            titleLines.push(`账号:${accountLabel} | 状态:屏蔽公司 | 公司:${record.companyName}\n来源:${record.sourceTypes || '屏蔽公司'}`);
         }
 
         const bossName = extractBossName(hrInfo || '');
